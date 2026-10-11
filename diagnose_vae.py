@@ -106,7 +106,8 @@ def comparison_metrics(target, rgb_original, rgb_rgba, alpha_rgba):
     }
 
 
-def save_comparison(target, rgb_original, rgba_model, output, frame_numbers=(0, 8, 16)):
+def save_comparison(target, rgb_original, rgba_model, output,
+                    frame_numbers=(0, 8, 16), rgba_without_alpha=None):
     from PIL import Image, ImageDraw
     import numpy as np
     out = Path(output)
@@ -115,7 +116,9 @@ def save_comparison(target, rgb_original, rgba_model, output, frame_numbers=(0, 
     orig = rgb_original.detach().float().cpu().clamp(0, 1)
     pred = rgba_model.detach().float().cpu().clamp(0, 1)
     H, W = t.shape[-2:]
-    sheet = Image.new("RGB", (5 * W, len(frame_numbers) * H), (12, 12, 12))
+    columns_count = 6 if rgba_without_alpha is not None else 5
+    off = rgba_without_alpha.detach().float().cpu().clamp(0, 1) if rgba_without_alpha is not None else None
+    sheet = Image.new("RGB", (columns_count * W, len(frame_numbers) * H), (12, 12, 12))
     draw = ImageDraw.Draw(sheet)
     for row, index in enumerate(frame_numbers):
         gt = t[:, index].permute(1, 2, 0).numpy()
@@ -130,11 +133,16 @@ def save_comparison(target, rgb_original, rgba_model, output, frame_numbers=(0, 
             rgba[:, :, :3] * rgba[:, :, 3:] + (1 - rgba[:, :, 3:]) * white,
             np.repeat(rgba[:, :, 3:], 3, axis=2),
         ]
+        if off is not None:
+            off_array = off[:, index].permute(1, 2, 0).numpy()
+            columns.append(np.repeat(off_array[:, :, 3:], 3, axis=2))
         for col, arr in enumerate(columns):
             image = Image.fromarray(np.uint8(np.round(arr.clip(0, 1) * 255)), "RGB")
             sheet.paste(image, (col * W, row * H))
     # Save a legend separately so pixels are not obscured.
     legend = ["GT on black", "Original RGB H3 VAE", "RGBA on black", "RGBA on white", "RGBA alpha mask"]
+    if off is not None:
+        legend.append("Alpha mask with input alpha channel zeroed")
     sheet.save(out)
     out.with_suffix(".json").write_text(json.dumps({"columns": legend, "frames": list(frame_numbers)}, indent=2))
     return out
@@ -221,7 +229,8 @@ def main():
         metrics["sample"] = n
         summaries.append(metrics)
         comparison_path = save_comparison(rgba[0], original[0], predicted[0],
-                                         output / f"sample_{n:02d}_comparison.png")
+                                         output / f"sample_{n:02d}_comparison.png",
+                                         rgba_without_alpha=off[0])
         print("DIAGNOSIS " + json.dumps(metrics), flush=True)
         print(f"COMPARE_IMAGE {comparison_path}", flush=True)
         break
