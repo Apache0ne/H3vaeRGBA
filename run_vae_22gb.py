@@ -121,13 +121,16 @@ def validate(vae, loader, device, preview_dir=None, preview_frames=17):
     stats = []
     for index, rgba in enumerate(loader):
         rgba = rgba.to(device=device, dtype=torch.float32, non_blocking=True)
-        with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16):
-            moments = vae._encode_clip(rgba_to_vae_input(rgba))
-            z = moments.chunk(2, dim=1)[0]
-            recon = vae._decode_clip(z)[:, :, vae.frame_pre_padding:]
-            if recon.shape != rgba.shape:
-                raise RuntimeError(f"Validation shape mismatch {recon.shape} / {rgba.shape}")
-            pred = vae_output_to_rgba(recon.float())
+        with torch.no_grad():
+            # H3 explicitly pins the video encoder and quant_conv in FP32.
+            with torch.autocast("cuda", enabled=False):
+                moments = vae._encode_clip(rgba_to_vae_input(rgba).float())
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                z = moments.chunk(2, dim=1)[0]
+                recon = vae._decode_clip(z)[:, :, vae.frame_pre_padding:]
+                if recon.shape != rgba.shape:
+                    raise RuntimeError(f"Validation shape mismatch {recon.shape} / {rgba.shape}")
+                pred = vae_output_to_rgba(recon.float())
         loss, parts = rgba_reconstruction_loss(pred, rgba)
         entry = {"loss": float(loss), **{name: float(value) for name, value in parts.items()}}
         # Record an easily interpretable held-out alpha pixel MAE.
@@ -237,7 +240,8 @@ def main():
     vae.to(device)
     # Critical: the new trainable alpha parameters should retain FP32 master
     # weights under BF16 autocast. Never cast the entire VAE to BF16 again.
-    vae.encoder.conv_in.float()
+    vae.encoder.float()
+    vae.quant_conv.float()
     vae.decoder.proj_out.float()
     trainable = configure_stage1(vae)
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.0)
@@ -285,8 +289,10 @@ def main():
             epoch += 1
             for batch in train_loader:
                 x = batch.to(device, dtype=torch.float32, non_blocking=True)
+                # Keep the encoder FP32 as in the official H3 configuration.
+                with torch.autocast(device_type="cuda", enabled=False):
+                    moments = vae._encode_clip(rgba_to_vae_input(x).float())
                 with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    moments = vae._encode_clip(rgba_to_vae_input(x))
                     # Use posterior MODE (mu), not noisy stochastic samples
                     # for first-stage reconstruction training.
                     z = moments.chunk(2, dim=1)[0]
