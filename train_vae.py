@@ -153,10 +153,15 @@ def main():
             rgba = rgba.to("cuda", dtype=torch.float32, non_blocking=True)
             input_tensor = rgba_to_vae_input(rgba)
             optimizer.zero_grad(set_to_none=True)
+            # VAE-only clips are 17 frames, unlike H3 DiT's 17n+5.
+            # The public encode()/decode() wrappers drop 3 latent tokens and
+            # cannot reconstruct a lone 17-frame sequence. Use the official
+            # *single temporal clip* encoder/decoder, then discard its
+            # 3 leading temporal padding frames to obtain exactly 17.
             with torch.autocast("cuda", dtype=torch.bfloat16):
-                posterior = vae.encode(input_tensor).latent_dist
-                z = posterior.mode()
-                reconstruction = vae.decode(z).sample
+                moments = vae._encode_clip(input_tensor)
+                z = moments.chunk(2, dim=1)[0]  # posterior mode
+                reconstruction = vae._decode_clip(z)[:, :, vae.frame_pre_padding:]
             if reconstruction.shape != input_tensor.shape:
                 raise RuntimeError(f"Temporal/shape mismatch: {reconstruction.shape} vs {input_tensor.shape}")
             result = vae_output_to_rgba(reconstruction.float())
