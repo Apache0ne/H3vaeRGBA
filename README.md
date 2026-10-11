@@ -31,12 +31,18 @@ python -m pytest tests -q
 python -m pip install opencv-python-headless
 python tools/dataset_audit.py --foreground /path/data_fgr --alpha /path/data_pha --output manifest.json
 ```
-Use the paired foreground/alpha video data in https://huggingface.co/datasets/htdong/Wan-Alpha-dataset . Audit licenses before reuse.
+For automatic download (~1.08 GB compressed), safe extraction and audit (all CPU):
+```bash
+python -m pip install -r requirements.txt
+python tools/prepare_data.py --workdir ./wan_alpha_data
+python train_vae.py --manifest ./wan_alpha_data/manifest.json --dry-run
+```
+Use paired data from https://huggingface.co/datasets/htdong/Wan-Alpha-dataset ; inspect archive samples and licenses before reuse.
 
 ### Experimental VAE train (GPU required, *not yet validated on A100*)
-This runner uses the upstream **Diffusers** H3 VAE. It intentionally starts with small frames and 17-frame clips. Install a Diffusers revision containing `AutoencoderKLMiniMaxH3` and `peft`/HF auth if necessary.
+This runner uses the upstream **Diffusers** H3 VAE. It intentionally starts with small frames and 17-frame clips. Install a Diffusers revision containing `AutoencoderKLMiniMaxH3` and HF auth if necessary.
 ```bash
-python -m pip install -U 'diffusers[torch]' transformers accelerate huggingface_hub safetensors opencv-python-headless numpy
+python -m pip install -r requirements.txt
 python train_vae.py --manifest manifest.json --output outputs/vae_trial --resolution 128 --max-steps 10
 ```
 **Do not launch the above training until all shape/precision/memory checks succeed in a disposable GPU environment.** It downloads a large VAE. `--dry-run` audits the manifest without loading the checkpoint.
@@ -50,3 +56,6 @@ BF16 GPU autocast; trainable master weights retained as loaded by Diffusers. Enc
 - The 17-frame VAE training samples are not interchangeable with H3's 22-frame diffusion training samples.
 - RGB teacher baseline and comprehensive real-checkpoint round-trip tests still need implementation.
 - Source/model/dataset usage is subject to their respective licenses. No model weights or datasets are committed here.
+
+## Data and LoRA compatibility warning
+The Wan-Alpha paired foreground/matte archive is a starting VAE dataset, **not a verified text-captioned H3 diffusion training corpus**. Text-to-transparent-video LoRA training needs prompt-aligned clips, high-quality alpha, varied transparency types, and a held-out test set. The submitted DiffSynth-Studio archive includes H3 LoRA training scripts and BF16 mode, but its training cache pipeline currently uses an RGB VAE. It must be adapted to cache the new RGBA 24-channel latents and respect H3 17n+5 frame lengths. The 33B DiT's BF16 weights alone need roughly 66 GB; an A100 80GB likely needs frozen-weight quantization/offload and cached text/audio conditions for LoRA training. BF16 *compute* is compatible with quantized frozen weight storage. This phase is NOT yet implemented or validated.
