@@ -30,6 +30,9 @@ def test_comparison_png(tmp_path):
     path = save_comparison(gt, original, gt, tmp_path / "diagnose.png")
     assert path.is_file()
     assert Image.open(path).size == (5 * 32, 3 * 32)
+    path6 = save_comparison(gt, original, gt, tmp_path / "ablation.png",
+                            rgba_without_alpha=gt)
+    assert Image.open(path6).size == (6 * 32, 3 * 32)
 
 
 def test_alpha_ablation_detects_when_encoder_ignores_alpha():
