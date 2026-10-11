@@ -170,6 +170,10 @@ def validate(vae, loader, device, preview_dir=None, preview_frames=17,
         entry["visible_rgb_mae_measured"] = float(
             visible_rgb_mae(pred[:, :3], rgba[:, :3], rgba[:, 3:4])
         )
+        if rgb_ref is not None:
+            entry["pretrained_teacher_visible_rgb_mae"] = float(
+                visible_rgb_mae(rgb_ref, rgba[:, :3], rgba[:, 3:4])
+            )
         # Compare thresholded alpha silhouettes as well as alpha MAE.
         mask_p = pred[:, 3:4] > 0.5
         mask_t = rgba[:, 3:4] > 0.5
