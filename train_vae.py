@@ -138,6 +138,9 @@ def main():
     vae = widen_h3_vae(vae)
     vae.enable_gradient_checkpointing()
     vae.to("cuda")
+    # BF16 forward compute, FP32 master weights for the new trainable projection.
+    # H3 upstream already retains the encoder in FP32 for numerical stability.
+    vae.decoder.proj_out.float()
     trainable = configure_stage1(vae)
     optimizer = torch.optim.AdamW(trainable, lr=args.learning_rate, weight_decay=0.0)
     loader = DataLoader(ds, shuffle=True, num_workers=0, batch_size=args.batch_size,
