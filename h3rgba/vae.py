@@ -74,6 +74,9 @@ def widen_h3_vae(vae):
             new_projection.bias.zero_()
             new_projection.bias[:3 * patch_volume].copy_(projection.bias)
     vae.decoder.proj_out = new_projection
+    # Diffusers' ViT decoder keeps out_channels as a separate runtime field
+    # for the final patch unflatten; the config and proj_out alone are NOT enough.
+    vae.decoder.out_channels = 4
     vae.register_to_config(in_channels=4, out_channels=4)
     return vae
 
