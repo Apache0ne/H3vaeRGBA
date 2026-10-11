@@ -260,6 +260,19 @@ def main():
         low_cpu_mem_usage=True, use_safetensors=True,
     )
     log(f"VAE_LOADED in {round(time.monotonic()-started, 1)} sec")
+    if args.hf_model == "MiniMaxAI/MiniMax-H3":
+        # Prove the official 3-shard checkpoint is present locally. This
+        # check is read-only and never initiates another model download.
+        from huggingface_hub import hf_hub_download
+        from tools.verify_h3_cache import check_snapshot
+        config_path = Path(hf_hub_download(
+            args.hf_model, "vae/config.json", local_files_only=True
+        ))
+        snapshot = config_path.parent.parent
+        if not check_snapshot(snapshot):
+            raise RuntimeError("Cannot verify all 3 official H3 video VAE weight shards; "
+                               "refusing to claim a pretrained load.")
+        log("OFFICIAL_H3_VAE_WEIGHTS_VERIFIED")
     vae = widen_h3_vae(vae)
     vae.enable_gradient_checkpointing()
     # Start with no spatial splitting at 128x128, matching the original
