@@ -1,5 +1,24 @@
 # MiniMax-H3 RGBA research
 
+## Diagnose original H3 VAE vs transparent VAE before more GPU training
+
+A 100-step clean alpha-only rerun reproduced blurred RGB and alpha masks at 128×128. This is **not evidence that the pretrained checkpoint was skipped**: the new tensor verifier confirms actual pretrained weights. At 128px, H3's 16× spatial compression makes only an 8×8 latent grid. A visible blurred ring can therefore originate in the **original RGB VAE** as well as in the new alpha branch.
+
+Use the new read-only comparator, which loads the official 10.4 GB pretrained VAE only once, verifies the weights, reconstructs a held-out 17-frame RGB clip with the original 3-channel architecture, then widens **that same VAE** and applies the saved alpha adapter to reconstruct exactly the same clip:
+
+```bash
+git pull --ff-only
+python diagnose_vae.py \
+  --workdir /content/h3rgba_data \
+  --alpha-checkpoint /content/h3rgba_runs/vae22_fresh_verified/checkpoints/alpha_last.safetensors \
+  --resolution 128 --output-dir /content/h3rgba_runs/vae_diagnosis
+```
+
+The output `sample_00_comparison.png` shows five columns: *target on black*, *original pretrained H3 RGB*, *adapted RGBA on black*, *adapted RGBA on white*, and *adapted alpha matte*. `metrics.json` reports separate original RGB and adapted RGB visible-pixel MAE, alpha MAE, and alpha IoU. This makes it clear whether the bottleneck predates our RGBA work. No training, optimizer, or DiT is used. Test at 128 first; 192 or 256 can be investigated only after measuring VRAM.
+
+**Do not train longer blindly.** If original H3 RGB looks badly blurred too, focus on native resolution, cropping and latent detail before adding VAE LoRA steps. If original RGB is sharp but adapted RGB is blurry, inspect the alpha encoder channel and latent shift before increasing decoder capacity.
+
+
 ## Proven pretrained VAE loading and optional clean Stage-1 rerun
 
 **Do not mistake cache-file-listing filters for model loading failures.** The official VAE has three shards totaling 10.416 GB and 703 indexed tensors. The training runner already uses `AutoencoderKLMiniMaxH3.from_pretrained(..., subfolder="vae")`. The new code now additionally compares loaded encoder/decoder **tensor values** against the original safetensors BEFORE widening the model. This ensures the original pretrained checkpoint is not being skipped.
