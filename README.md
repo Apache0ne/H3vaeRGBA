@@ -1,5 +1,50 @@
 # MiniMax-H3 RGBA research
 
+## Stage 3: preserve the pretrained RGB path while learning alpha
+
+Observed ablation on a held-out planet clip:
+
+| Metric | True alpha supplied | Added alpha input neutralized |
+|---|---:|---:|
+| Visible RGB MAE (lower better) | 0.116372 | 0.080935 |
+| Alpha IoU (higher better) | 0.448150 | 0.152357 |
+| Alpha MAE (lower better) | 0.433365 | 0.502688 |
+
+Original H3 RGB visible MAE was 0.080974. The alpha information is reaching latents (absolute mean delta 0.742271, relative delta 0.292007), but corrupts the RGB reconstruction. **Do not repeat the previous loss alone.**
+
+New optional training flags in `run_vae_22gb.py`:
+
+- `--rgb-truth-weight`: weighted visible-pixel RGB error against source frames, normalized by visible pixel area.
+- `--rgb-teacher-weight`: RGB deviation from a **no-grad frozen-original-H3 teacher**, computed using the same widened model with the extra alpha input zeroed and all decoder LoRAs temporarily bypassed.
+- `--latent-shift-weight`: relative latent L1 penalty, intended as a **small stabilizer**, not a hard requirement to ignore alpha.
+
+The original visual VAE is still loaded and verified. Stage 3 adds no extra model copy, but the teacher requires another no-gradient encoder and decoder forward per training/validation sample. All pretrained RGB weight slices stay gradient-frozen. The original Stage-1/Stage-2 runs are unchanged.
+
+**Start with a 2-step GPU memory/gradient experiment in a NEW output directory**, initialized from the verified Stage-1 100-step alpha checkpoint. This is a controlled experiment and **not yet validated on a real 22 GiB GPU**:
+
+```bash
+python run_vae_22gb.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/vae22_rgb_preservation \
+  --local-files-only \
+  --init-alpha /content/h3rgba_runs/vae22_fresh_verified/checkpoints/alpha_last.safetensors \
+  --decoder-lora-rank 4 --resolution 128 --batch-size 1 \
+  --alpha-loss-weight 5 --edge-loss-weight 4 \
+  --rgb-truth-weight 2 --rgb-teacher-weight 3 --latent-shift-weight 0.2 \
+  --lr 5e-5 --steps 2 --val-every 1 --save-every 1
+```
+
+Inspect `peak_alloc_gib`, `visible_rgb_mae_measured`, `rgb_teacher_mae`,
+`relative_latent_shift`, `alpha_iou` and the contact sheet.
+To keep the baseline RGB MAE near ~0.081 while retaining alpha IoU near ~0.448
+would already be a meaningful improvement on this one clip. Improvement on one
+sample is not evidence of generalization: use the entire held-out set and
+multiple types of transparency before moving to DiT LoRA.
+
+If successful, continue using `--resume --steps 100` and the *same* penalty
+flags, output directory, and LoRA rank. The runner explicitly rejects changing
+these objective settings when resuming an optimizer checkpoint.
+
+
 ## Diagnose original H3 VAE vs transparent VAE before more GPU training
 
 A 100-step clean alpha-only rerun reproduced blurred RGB and alpha masks at 128×128. This is **not evidence that the pretrained checkpoint was skipped**: the new tensor verifier confirms actual pretrained weights. At 128px, H3's 16× spatial compression makes only an 8×8 latent grid. A visible blurred ring can therefore originate in the **original RGB VAE** as well as in the new alpha branch.
