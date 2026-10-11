@@ -1,5 +1,37 @@
 # MiniMax-H3 RGBA research
 
+## Improved alpha-edge training (optional decoder LoRA)
+
+The initial alpha-slice-only stage preserves RGB but may produce soft masks (e.g. ringed planets becoming gray blobs). New **Stage 2** keeps the original 24-channel latent interface and trains rank-4 LoRA on the visual decoder's q/k/v/o and MLP layers, plus the original alpha input/output slices. No 33B DiT is loaded.
+
+Start by reusing your existing Stage-1 adapter; **do not resume its optimizer**, because the Stage-2 optimizer has extra LoRA parameters. Use a **new output directory**:
+
+```bash
+python run_vae_22gb.py \
+  --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/vae22_lora4 \
+  --init-alpha /content/h3rgba_runs/vae22/checkpoints/alpha_last.safetensors \
+  --decoder-lora-rank 4 \
+  --resolution 128 --batch-size 1 --grad-accum 1 \
+  --alpha-loss-weight 5 --edge-loss-weight 4 \
+  --lr 5e-5 --steps 2 --val-every 1 --save-every 1
+```
+
+Check GPU peak allocation in the output and inspect `previews/step_000002/contact_sheet.png` before continuing. If VRAM fits and the gradients are finite, continue with the **same output directory**:
+
+```bash
+python run_vae_22gb.py \
+  --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/vae22_lora4 \
+  --decoder-lora-rank 4 --resolution 128 --batch-size 1 --grad-accum 1 \
+  --alpha-loss-weight 5 --edge-loss-weight 4 \
+  --lr 5e-5 --resume --steps 300 --val-every 25 --save-every 25
+```
+
+Stage 2 saves `checkpoints/alpha_last.safetensors` and `checkpoints/decoder_lora_last.safetensors`, plus resumable optimizer state and validation `alpha_iou`/`alpha_mae`. LoRA checkpoints are **VAE decoder** adapters, NOT text-to-video DiT LoRAs. Watch alpha IoU and real composite quality; simple decreasing loss is insufficient.
+
+**Memory caveat:** Stage 2 with the full pretrained H3 VAE hasn't been executed on a real 22 GiB GPU. Gradient checkpointing and rank-4 are conservative, not proof that it will fit. No GPU memory claim is established by CPU tests. If OOM, stop, lower resolution to 96 in a new output directory or use more capable hardware.
+
 ## Colab import fix: incompatible optional TorchAO
 
 If Python reports `ImportError: cannot import name 'FqnToConfig' from 'torchao.quantization'`, run this **before** importing Diffusers:
