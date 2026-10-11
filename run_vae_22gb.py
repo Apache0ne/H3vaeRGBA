@@ -51,6 +51,10 @@ def arguments():
     p.add_argument("--resume", action="store_true", help="Restore last alpha checkpoint and optimizer state")
     p.add_argument("--eval-only", action="store_true", help="Load last alpha weights and export validation only")
     p.add_argument("--preflight-only", action="store_true", help="Audit and decode data, no HF model weights or GPU")
+    p.add_argument("--verify-weights-only", action="store_true",
+                   help="Load official pretrained VAE and compare its tensors to checkpoint; do not train")
+    p.add_argument("--local-files-only", action="store_true",
+                   help="Require pretrained H3 checkpoint in the existing local cache; no model download")
     p.add_argument("--preview-frames", type=int, default=17,
                    help="Number of RGBA output frames to save per validation (up to 17)")
     return p.parse_args()
@@ -199,6 +203,8 @@ def main():
         raise ValueError("Invalid alpha/edge loss weights")
     if args.init_alpha and (args.resume or args.eval_only):
         raise ValueError("Use --init-alpha only for a fresh run, not with --resume or --eval-only")
+    if args.verify_weights_only and (args.preflight_only or args.resume or args.eval_only):
+        raise ValueError("--verify-weights-only cannot be combined with preflight/resume/eval")
 
     manifest_path = prepare_manifest(args)
     from train_vae import PairedVideoDataset
@@ -247,6 +253,14 @@ def main():
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     output = Path(args.output_dir).expanduser().resolve()
+    if not (args.resume or args.eval_only or args.verify_weights_only):
+        existing = [output / "metrics.jsonl", output / "validation.jsonl",
+                    output / "checkpoints" / "optimizer_last.pt"]
+        if any(p.exists() for p in existing):
+            raise FileExistsError(
+                f"Existing training run at {output}. Use a NEW --output-dir for a "
+                "clean restart or --resume for continuation. Old checkpoints are untouched."
+            )
     output.mkdir(parents=True, exist_ok=True)
     (output / "config.json").write_text(json.dumps(vars(args), indent=2))
 
@@ -258,21 +272,27 @@ def main():
     vae = AutoencoderKLMiniMaxH3.from_pretrained(
         args.hf_model, subfolder="vae", torch_dtype=torch.bfloat16,
         low_cpu_mem_usage=True, use_safetensors=True,
+        local_files_only=args.local_files_only,
     )
     log(f"VAE_LOADED in {round(time.monotonic()-started, 1)} sec")
     if args.hf_model == "MiniMaxAI/MiniMax-H3":
         # Prove the official 3-shard checkpoint is present locally. This
         # check is read-only and never initiates another model download.
         from huggingface_hub import hf_hub_download
-        from tools.verify_h3_cache import check_snapshot
+        from tools.verify_loaded_vae import verify_loaded_vae
         config_path = Path(hf_hub_download(
             args.hf_model, "vae/config.json", local_files_only=True
         ))
         snapshot = config_path.parent.parent
-        if not check_snapshot(snapshot):
-            raise RuntimeError("Cannot verify all 3 official H3 video VAE weight shards; "
-                               "refusing to claim a pretrained load.")
-        log("OFFICIAL_H3_VAE_WEIGHTS_VERIFIED")
+        result = verify_loaded_vae(vae, snapshot)
+        (output / "pretrained_weight_verification.json").write_text(
+            json.dumps(result, indent=2))
+        log("OFFICIAL_H3_VAE_WEIGHTS_VERIFIED_IN_MEMORY")
+    elif args.verify_weights_only:
+        raise RuntimeError("--verify-weights-only supports only MiniMaxAI/MiniMax-H3")
+    if args.verify_weights_only:
+        log("PRETRAINED_WEIGHTS_ONLY_OK: checkpoint matches loaded encoder/decoder tensors, no training")
+        return
     vae = widen_h3_vae(vae)
     vae.enable_gradient_checkpointing()
     # Start with no spatial splitting at 128x128, matching the original
