@@ -14,7 +14,7 @@ python diagnose_vae.py \
   --resolution 128 --output-dir /content/h3rgba_runs/vae_diagnosis
 ```
 
-The output `sample_00_comparison.png` shows five columns: *target on black*, *original pretrained H3 RGB*, *adapted RGBA on black*, *adapted RGBA on white*, and *adapted alpha matte*. `metrics.json` reports separate original RGB and adapted RGB visible-pixel MAE, alpha MAE, and alpha IoU. This makes it clear whether the bottleneck predates our RGBA work. No training, optimizer, or DiT is used. Test at 128 first; 192 or 256 can be investigated only after measuring VRAM.
+The output `sample_00_comparison.png` now has **six** columns: *target on black*, *original pretrained H3 RGB*, *adapted RGBA on black*, *adapted RGBA on white*, *adapted alpha matte*, and *adapted matte with alpha input zeroed*. `metrics.json` reports original/adapted visible RGB MAE, alpha MAE/IoU, `alpha_input_latent_mae_delta`, `alpha_zeroed_iou` and `rgb_with_vs_without_alpha_input_mae`. If zeroing the alpha channel hardly changes alpha IoU, the model may be guessing the mask from RGB instead of conveying new alpha information through the latent bottleneck. If the ablation destroys mask quality, the alpha signal is encoded but the decoder has trouble recovering a sharp silhouette. This test never updates weights. No training, optimizer, or DiT is used. Test at 128 first; 192 or 256 can be investigated only after measuring VRAM.
 
 **Do not train longer blindly.** If original H3 RGB looks badly blurred too, focus on native resolution, cropping and latent detail before adding VAE LoRA steps. If original RGB is sharp but adapted RGB is blurry, inspect the alpha encoder channel and latent shift before increasing decoder capacity.
 
