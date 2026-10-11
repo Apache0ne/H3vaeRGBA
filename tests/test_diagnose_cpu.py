@@ -2,7 +2,7 @@
 import torch
 from PIL import Image
 
-from diagnose_vae import comparison_metrics, save_comparison, rgb_to_h3, h3_to_rgb
+from diagnose_vae import (comparison_metrics, save_comparison, rgb_to_h3, h3_to_rgb, encode_alpha_ablation)
 
 
 def test_rgb_convention_and_rgb_baseline_metric():
@@ -30,3 +30,27 @@ def test_comparison_png(tmp_path):
     path = save_comparison(gt, original, gt, tmp_path / "diagnose.png")
     assert path.is_file()
     assert Image.open(path).size == (5 * 32, 3 * 32)
+
+
+def test_alpha_ablation_detects_when_encoder_ignores_alpha():
+    from diffusers import AutoencoderKLMiniMaxH3
+    from h3rgba.vae import widen_h3_vae
+    model = AutoencoderKLMiniMaxH3(
+        latent_channels=24, block_out_channels=(8, 8, 8, 8, 8, 8),
+        layers_per_block=1, norm_num_groups=4, decoder_num_layers=1,
+        decoder_num_attention_heads=2, decoder_attention_head_dim=16,
+        decoder_ffn_mult=2, clip_length=17, token_drop=3,
+    )
+    model.disable_tiling()
+    model = widen_h3_vae(model)
+    model.eval()
+    x = torch.rand(1, 4, 17, 32, 32)
+    # Zero-initialized alpha encoder channel cannot carry alpha signal.
+    _, score = encode_alpha_ablation(model, x)
+    assert score["alpha_input_latent_mae_delta"] == 0
+    assert score["alpha_input_latent_relative_delta"] == 0
+    assert 0 <= score["alpha_zeroed_iou"] <= 1
+    with torch.no_grad():
+        model.encoder.conv_in.weight[:, 3].fill_(0.1)
+    _, changed = encode_alpha_ablation(model, x)
+    assert changed["alpha_input_latent_mae_delta"] > 0
