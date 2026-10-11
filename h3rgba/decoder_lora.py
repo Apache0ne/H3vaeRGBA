@@ -5,6 +5,7 @@ frozen and bit-identical at initialization. LoRA matrices use FP32 master
 weights with BF16 autocast for the rest of the VAE.
 """
 import math
+from contextlib import contextmanager
 
 import torch
 from torch import nn
@@ -18,6 +19,7 @@ class LoRALinear(nn.Module):
             raise ValueError("LoRALinear requires an nn.Linear and positive rank")
         self.base = base
         self.base.requires_grad_(False)
+        self.enabled = True
         self.rank = int(rank)
         self.scale = float(rank if alpha is None else alpha) / rank
         self.lora_down = nn.Parameter(torch.empty(rank, base.in_features,
@@ -28,6 +30,8 @@ class LoRALinear(nn.Module):
 
     def forward(self, x):
         original = self.base(x)
+        if not self.enabled:
+            return original
         # Cast the intermediate only, not the full model or base weights.
         y = F.linear(x.to(self.lora_down.dtype), self.lora_down)
         y = F.linear(y, self.lora_up) * self.scale
@@ -94,3 +98,21 @@ def load_decoder_lora_state(vae, path):
             if value.shape != target.shape:
                 raise ValueError(f"Shape mismatch for {name}: {value.shape} vs {target.shape}")
             target.copy_(value.to(device=target.device, dtype=target.dtype))
+
+
+@contextmanager
+def temporarily_disable_decoder_lora(vae):
+    """Use only the frozen original pretrained decoder linears for a teacher pass.
+
+    Does not change any parameter, gradients or optimizer state. Restoration
+    occurs even if the forward pass raises.
+    """
+    modules = [m for m in vae.decoder.modules() if isinstance(m, LoRALinear)]
+    old = [m.enabled for m in modules]
+    try:
+        for module in modules:
+            module.enabled = False
+        yield
+    finally:
+        for module, flag in zip(modules, old):
+            module.enabled = flag
