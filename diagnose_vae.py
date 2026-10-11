@@ -47,6 +47,44 @@ def roundtrip_clip(vae, pixels):
     return out
 
 
+def encode_alpha_ablation(vae, rgba):
+    """Compare true encoded alpha vs physically ZERO alpha-channel activation.
+
+    A zero *encoded input channel* (not alpha=0 in pixel space) exactly removes
+    the added encoder conv's contribution. Both passes use the same pretrained
+    RGB and decoder weights; neither pass changes any model parameter.
+    """
+    if rgba.shape[1] != 4 or rgba.shape[2] != 17:
+        raise ValueError("Expected [B,4,17,H,W] rgba video")
+    x = rgba_to_vae_input(rgba)
+    no_alpha = x.clone()
+    no_alpha[:, 3].zero_()
+    with torch.no_grad():
+        if rgba.device.type == "cuda":
+            with torch.autocast("cuda", enabled=False):
+                z_full = vae._encode_clip(x.float()).chunk(2, dim=1)[0]
+                z_off = vae._encode_clip(no_alpha.float()).chunk(2, dim=1)[0]
+            with torch.autocast("cuda", dtype=torch.bfloat16):
+                decoded_off = vae._decode_clip(z_off)[:, :, vae.frame_pre_padding:]
+        else:
+            z_full = vae._encode_clip(x.float()).chunk(2, dim=1)[0]
+            z_off = vae._encode_clip(no_alpha.float()).chunk(2, dim=1)[0]
+            decoded_off = vae._decode_clip(z_off)[:, :, vae.frame_pre_padding:]
+        rgba_off = vae_output_to_rgba(decoded_off.float()).clamp(0, 1)
+    latent_delta = float((z_full - z_off).abs().mean())
+    latent_rms = float(z_off.float().square().mean().sqrt())
+    alpha_off = rgba_off[:, 3:4]
+    gt_alpha = rgba[:, 3:4]
+    intersection = ((alpha_off > .5) & (gt_alpha > .5)).sum()
+    union = ((alpha_off > .5) | (gt_alpha > .5)).sum()
+    return rgba_off, {
+        "alpha_input_latent_mae_delta": round(latent_delta, 6),
+        "alpha_input_latent_relative_delta": round(latent_delta / (latent_rms + 1e-8), 6),
+        "alpha_zeroed_mae": round(float((alpha_off - gt_alpha).abs().mean()), 6),
+        "alpha_zeroed_iou": round(float(intersection / union) if union > 0 else 1.0, 6),
+    }
+
+
 def comparison_metrics(target, rgb_original, rgb_rgba, alpha_rgba):
     """Return independent RGB L1 scores and alpha MAE/IoU; values in [0,1]."""
     a = target[:, 3:4]
@@ -173,6 +211,13 @@ def main():
             predicted = vae_output_to_rgba(roundtrip_clip(vae, rgba_to_vae_input(rgba))).clamp(0, 1)
         # original is only calculated once for single sample; limit CLI to 1
         metrics = comparison_metrics(rgba, original, predicted[:, :3], predicted[:, 3:])
+        off, ablation = encode_alpha_ablation(vae, rgba)
+        metrics.update(ablation)
+        metrics["rgb_without_alpha_input_visible_mae"] = round(
+            float(((off[:, :3] - rgba[:, :3]).abs() * rgba[:, 3:4]).sum() /
+                  (3 * rgba[:, 3:4].sum() + 1e-6)), 6)
+        metrics["rgb_with_vs_without_alpha_input_mae"] = round(
+            float((predicted[:, :3] - off[:, :3]).abs().mean()), 6)
         metrics["sample"] = n
         summaries.append(metrics)
         comparison_path = save_comparison(rgba[0], original[0], predicted[0],
