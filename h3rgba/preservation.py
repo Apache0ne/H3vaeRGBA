@@ -25,8 +25,8 @@ def visible_rgb_mae(rgb_pred, rgb_ref, target_alpha):
     if target_alpha.shape != rgb_pred[:, :1].shape:
         raise ValueError("Alpha shape mismatch")
     weight = target_alpha.detach().float().clamp(0, 1)
-    if float(weight.sum()) <= 0:
-        return rgb_pred.float().sum() * 0.0
+    # Also handles all-transparent clips: numerator is then zero and the
+    # clamped denominator prevents NaNs without a GPU-to-CPU sync.
     return ((rgb_pred.float() - rgb_ref.float()).abs() * weight).sum() / (
         3.0 * weight.sum().clamp_min(1e-6)
     )
