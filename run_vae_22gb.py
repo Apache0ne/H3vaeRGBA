@@ -277,6 +277,16 @@ def main():
         load_stage1_alpha(vae, args.init_alpha)
         log(f"INITIALIZED_ALPHA_FROM {args.init_alpha}")
     if args.decoder_lora_rank:
+        # LoRA inside the residual attention/MLP path needs a nonzero H3
+        # residual gate. Tiny random models initialize these gates to zero.
+        # The pretrained checkpoint should have trained nonzero gates.
+        with torch.no_grad():
+            gate_max = max(float(g.abs().max()) for block in vae.decoder.transformer_blocks
+                           for g in (block.scale1, block.scale2))
+        log(f"H3_DECODER_GATE_MAX {gate_max:.6f}")
+        if gate_max < 1e-6:
+            raise RuntimeError("Decoder residual gates all zero: attention/MLP LoRA "
+                               "would receive zero gradients. Verify pretrained H3 weights.")
         from h3rgba.decoder_lora import add_decoder_lora, decoder_lora_parameters
         count = add_decoder_lora(vae, rank=args.decoder_lora_rank)
         trainable += decoder_lora_parameters(vae)
