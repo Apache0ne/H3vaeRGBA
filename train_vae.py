@@ -21,12 +21,13 @@ from h3rgba.vae import (
 
 
 class PairedVideoDataset(Dataset):
-    def __init__(self, records, frames=17, resolution=128):
+    def __init__(self, records, frames=17, resolution=128, deterministic=False):
         if frames != 17:
             raise ValueError("The initial VAE-only runner uses 17-frame chunks.")
         if resolution < 64 or resolution % 32:
             raise ValueError("Resolution must be >=64 and divisible by 32.")
         self.records = records
+        self.deterministic = deterministic
         self.frames = frames
         self.resolution = resolution
 
@@ -56,7 +57,7 @@ class PairedVideoDataset(Dataset):
         entry = self.records[ix]
         total = int(entry["frames"])
         # Same temporal window and geometry for RGB and alpha.
-        start = random.randint(0, max(0, total - self.frames))
+        start = max(0, (total - self.frames) // 2) if self.deterministic else random.randint(0, max(0, total - self.frames))
         fg_frames = self.read_frames(entry["foreground"], start, self.frames)
         a_frames = self.read_frames(entry["alpha"], start, self.frames)
         rgb, alpha = [], []
@@ -67,9 +68,22 @@ class PairedVideoDataset(Dataset):
             # Alpha video is expected to encode a gray matte. Inspect examples
             # before use; do NOT infer alpha from an arbitrary RGB foreground.
             a = cv2.cvtColor(a, cv2.COLOR_BGR2GRAY)
-            sz = (self.resolution, self.resolution)
-            rgb.append(cv2.resize(fg, sz, interpolation=cv2.INTER_AREA))
-            alpha.append(cv2.resize(a, sz, interpolation=cv2.INTER_AREA))
+            # Letterbox both streams identically: no aspect-ratio distortion.
+            H, W = fg.shape[:2]
+            scale = self.resolution / max(H, W)
+            new_w = max(1, round(W * scale))
+            new_h = max(1, round(H * scale))
+            interp = cv2.INTER_AREA if scale < 1 else cv2.INTER_LINEAR
+            fg = cv2.resize(fg, (new_w, new_h), interpolation=interp)
+            a = cv2.resize(a, (new_w, new_h), interpolation=interp)
+            left = (self.resolution - new_w) // 2
+            top = (self.resolution - new_h) // 2
+            rgb_canvas = np.zeros((self.resolution, self.resolution, 3), dtype=np.uint8)
+            alpha_canvas = np.zeros((self.resolution, self.resolution), dtype=np.uint8)
+            rgb_canvas[top:top + new_h, left:left + new_w] = fg
+            alpha_canvas[top:top + new_h, left:left + new_w] = a
+            rgb.append(rgb_canvas)
+            alpha.append(alpha_canvas)
         result = np.concatenate(
             (np.stack(rgb, axis=0), np.stack(alpha, axis=0)[..., None]), axis=-1
         )
