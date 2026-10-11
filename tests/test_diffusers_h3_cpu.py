@@ -28,7 +28,9 @@ def test_real_h3_tiny_encoder_decoder_roundtrip_and_gradient():
     model = widen_h3_vae(model)
     params = configure_stage1(model)
     x = torch.rand(1, 4, 17, 32, 32, dtype=torch.float32)
-    pred = model.decode(model.encode(rgba_to_vae_input(x)).latent_dist.mode()).sample
+    moments = model._encode_clip(rgba_to_vae_input(x))
+    latent = moments.chunk(2, dim=1)[0]
+    pred = model._decode_clip(latent)[:, :, model.frame_pre_padding:]
     assert pred.shape == x.shape
     rgba = vae_output_to_rgba(pred)
     loss, parts = rgba_reconstruction_loss(rgba, x)
