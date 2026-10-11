@@ -17,6 +17,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install --index-url https://download.pytorch.org/whl/cpu torch
           pip install pytest
+          pip install -r requirements.txt
       - name: Validate syntax
         run: python -m compileall -q h3rgba tools train_vae.py tests
       - name: Run CPU tests
