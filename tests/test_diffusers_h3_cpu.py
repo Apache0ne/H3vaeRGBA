@@ -41,3 +41,12 @@ def test_real_h3_tiny_encoder_decoder_roundtrip_and_gradient():
     assert all(p.grad is not None for p in params)
     assert model.encoder.conv_in.weight.grad[:, :3].abs().sum() == 0
     assert model.decoder.proj_out.weight.grad[:3072].abs().sum() == 0
+
+    # Diffusion training follows the public 17n+5 temporal API, not
+    # the VAE-only 17-frame single-clip API.
+    with torch.no_grad():
+        x22 = torch.rand(1, 4, 22, 32, 32)
+        z22 = model.encode(rgba_to_vae_input(x22)).latent_dist.mode()
+        assert z22.shape[2] == 7
+        out22 = model.decode(z22).sample
+        assert out22.shape == x22.shape
