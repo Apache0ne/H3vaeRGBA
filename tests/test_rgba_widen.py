@@ -45,6 +45,7 @@ def test_rgb_weights_exact_and_alpha_zero_initialized():
     assert model.decoder.proj_out.weight[3072:].count_nonzero() == 0
     assert model.decoder.proj_out.bias[3072:].count_nonzero() == 0
     assert model.config.in_channels == model.config.out_channels == 4
+    assert model.decoder.out_channels == 4
     with pytest.raises(ValueError):
         widen_h3_vae(model)
 
