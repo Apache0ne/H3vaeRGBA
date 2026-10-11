@@ -1,5 +1,32 @@
 # MiniMax-H3 RGBA research
 
+## Proven pretrained VAE loading and optional clean Stage-1 rerun
+
+**Do not mistake cache-file-listing filters for model loading failures.** The official VAE has three shards totaling 10.416 GB and 703 indexed tensors. The training runner already uses `AutoencoderKLMiniMaxH3.from_pretrained(..., subfolder="vae")`. The new code now additionally compares loaded encoder/decoder **tensor values** against the original safetensors BEFORE widening the model. This ensures the original pretrained checkpoint is not being skipped.
+
+```bash
+git pull --ff-only
+python tools/colab_compat.py --repair
+# Load and verify the real pretrained weights, WITHOUT training
+python run_vae_22gb.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/check_pretrained \
+  --local-files-only --verify-weights-only
+
+# Optional clean Stage-1 comparison, NOT needed to fix the false cache reading.
+# Use new directory. This does NOT load prior alpha adapters or LoRA weights.
+python run_vae_22gb.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/vae22_verified_restart \
+  --local-files-only --decoder-lora-rank 0 \
+  --resolution 128 --batch-size 1 --steps 2 --val-every 1 --save-every 1
+python run_vae_22gb.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/vae22_verified_restart \
+  --local-files-only --decoder-lora-rank 0 --resume \
+  --resolution 128 --batch-size 1 --steps 100 --val-every 25 --save-every 25
+```
+
+Look for `OFFICIAL_H3_PRETRAINED_WEIGHTS_MATCH_IN_MEMORY` and `OFFICIAL_H3_VAE_WEIGHTS_VERIFIED_IN_MEMORY`; inspect `pretrained_weight_verification.json` in each output directory. If tensor comparison fails, no RGBA training starts. `--local-files-only` ensures that cached H3 weights are used without re-downloading. An existing training checkpoint cannot be overwritten accidentally: use a new output directory or `--resume`.
+
+
 ## Improved alpha-edge training (optional decoder LoRA)
 
 The initial alpha-slice-only stage preserves RGB but may produce soft masks (e.g. ringed planets becoming gray blobs). New **Stage 2** keeps the original 24-channel latent interface and trains rank-4 LoRA on the visual decoder's q/k/v/o and MLP layers, plus the original alpha input/output slices. No 33B DiT is loaded.
