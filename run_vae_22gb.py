@@ -44,6 +44,12 @@ def arguments():
                    help="Alpha pixel loss weight, original default 3")
     p.add_argument("--edge-loss-weight", type=float, default=1.,
                    help="Alpha Sobel-like spatial edge loss weight, original default 1")
+    p.add_argument("--rgb-truth-weight", type=float, default=0.0,
+                   help="Weight of visible-pixel RGB reconstruction versus true video")
+    p.add_argument("--rgb-teacher-weight", type=float, default=0.0,
+                   help="Weight of visible-pixel RGB preservation versus original H3 teacher")
+    p.add_argument("--latent-shift-weight", type=float, default=0.0,
+                   help="Gentle penalty on fractional change in original 24-channel latents")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-samples", type=int, default=3)
     p.add_argument("--val-every", type=int, default=25)
@@ -127,13 +133,18 @@ def save_frames(gt, predicted, path, max_frames=17):
 
 
 def validate(vae, loader, device, preview_dir=None, preview_frames=17,
-             alpha_weight=3., edge_weight=1.):
+             alpha_weight=3., edge_weight=1., rgb_truth_weight=0.,
+             rgb_teacher_weight=0., latent_shift_weight=0.):
     import torch
     from h3rgba.vae import rgba_to_vae_input, vae_output_to_rgba, rgba_reconstruction_loss
+    from h3rgba.preservation import original_rgb_teacher, preservation_penalties, visible_rgb_mae
     vae.eval()
     stats = []
     for index, rgba in enumerate(loader):
         rgba = rgba.to(device=device, dtype=torch.float32, non_blocking=True)
+        preserve = bool(rgb_truth_weight or rgb_teacher_weight or latent_shift_weight)
+        neutral, rgb_ref = (original_rgb_teacher(vae, rgba, need_rgb=bool(rgb_teacher_weight))
+                            if preserve else (None, None))
         with torch.no_grad():
             # H3 explicitly pins the video encoder and quant_conv in FP32.
             with torch.autocast("cuda", enabled=False):
@@ -146,7 +157,19 @@ def validate(vae, loader, device, preview_dir=None, preview_frames=17,
                 pred = vae_output_to_rgba(recon.float())
         loss, parts = rgba_reconstruction_loss(pred, rgba)
         loss = loss + (alpha_weight - 3.) * parts["alpha"] + (edge_weight - 1.) * parts["edges"]
-        entry = {"loss": float(loss), **{name: float(value) for name, value in parts.items()}}
+        extra = {}
+        if preserve:
+            penalty, extra = preservation_penalties(
+                pred, rgba, z, neutral, rgb_ref,
+                truth_weight=rgb_truth_weight, teacher_weight=rgb_teacher_weight,
+                latent_weight=latent_shift_weight,
+            )
+            loss = loss + penalty
+        entry = {"loss": float(loss), **{name: float(value) for name, value in parts.items()},
+                 **{name: float(value) for name, value in extra.items()}}
+        entry["visible_rgb_mae_measured"] = float(
+            visible_rgb_mae(pred[:, :3], rgba[:, :3], rgba[:, 3:4])
+        )
         # Compare thresholded alpha silhouettes as well as alpha MAE.
         mask_p = pred[:, 3:4] > 0.5
         mask_t = rgba[:, 3:4] > 0.5
@@ -182,7 +205,10 @@ def save_checkpoint(vae, optimizer, output_dir, step, metrics, args):
     tmp = checkpoint_dir / "optimizer_last.pt.tmp"
     torch.save({"step": step, "optimizer": optimizer.state_dict(),
                 "seed": args.seed, "resolution": args.resolution,
-                "decoder_lora_rank": args.decoder_lora_rank}, tmp)
+                "decoder_lora_rank": args.decoder_lora_rank,
+                "rgb_truth_weight": args.rgb_truth_weight,
+                "rgb_teacher_weight": args.rgb_teacher_weight,
+                "latent_shift_weight": args.latent_shift_weight}, tmp)
     os.replace(tmp, checkpoint_dir / "optimizer_last.pt")
     log(f"CHECKPOINT {src}")
 
@@ -201,6 +227,8 @@ def main():
         raise ValueError("LoRA rank must be between 0 and 32")
     if args.alpha_loss_weight <= 0 or args.edge_loss_weight < 0:
         raise ValueError("Invalid alpha/edge loss weights")
+    if min(args.rgb_truth_weight, args.rgb_teacher_weight, args.latent_shift_weight) < 0:
+        raise ValueError("RGB preservation/latent penalty weights must be nonnegative")
     if args.init_alpha and (args.resume or args.eval_only):
         raise ValueError("Use --init-alpha only for a fresh run, not with --resume or --eval-only")
     if args.verify_weights_only and (args.preflight_only or args.resume or args.eval_only):
@@ -235,6 +263,7 @@ def main():
     from diffusers import AutoencoderKLMiniMaxH3
     from h3rgba.vae import widen_h3_vae, configure_stage1, rgba_to_vae_input, vae_output_to_rgba, rgba_reconstruction_loss
     from h3rgba.checkpoint import load_stage1_alpha
+    from h3rgba.preservation import original_rgb_teacher, preservation_penalties
 
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA GPU required. For free CPU dataset checks use --preflight-only.")
@@ -350,6 +379,9 @@ def main():
                 raise ValueError("Resume resolution differs from the saved run")
             if state.get("decoder_lora_rank", 0) != args.decoder_lora_rank:
                 raise ValueError("LoRA rank differs from the saved run; use --init-alpha with a new output directory")
+            for key in ("rgb_truth_weight", "rgb_teacher_weight", "latent_shift_weight"):
+                if state.get(key, 0.0) != getattr(args, key):
+                    raise ValueError(f"Cannot change {key} on --resume; use new output directory")
             optimizer.load_state_dict(state["optimizer"])
             step = int(state["step"])
             log(f"RESUMED_AT_STEP {step}")
@@ -363,7 +395,10 @@ def main():
     if args.eval_only:
         results = validate(vae, val_loader, device,
                            output / "previews" / "eval_only", args.preview_frames,
-                           alpha_weight=args.alpha_loss_weight, edge_weight=args.edge_loss_weight)
+                           alpha_weight=args.alpha_loss_weight, edge_weight=args.edge_loss_weight,
+                           rgb_truth_weight=args.rgb_truth_weight,
+                           rgb_teacher_weight=args.rgb_teacher_weight,
+                           latent_shift_weight=args.latent_shift_weight)
         log("EVAL " + json.dumps(results))
         return
 
@@ -378,6 +413,13 @@ def main():
             epoch += 1
             for batch in train_loader:
                 x = batch.to(device, dtype=torch.float32, non_blocking=True)
+                preserve = bool(args.rgb_truth_weight or args.rgb_teacher_weight or
+                                args.latent_shift_weight)
+                # Important: no_grad teacher BEFORE the grad-enabled VAE forward,
+                # so it does not hold a second decoder's activation graph.
+                neutral, rgb_ref = (original_rgb_teacher(
+                    vae, x, need_rgb=bool(args.rgb_teacher_weight))
+                    if preserve else (None, None))
                 # Keep the encoder FP32 as in the official H3 configuration.
                 with torch.autocast(device_type="cuda", enabled=False):
                     moments = vae._encode_clip(rgba_to_vae_input(x).float())
@@ -392,6 +434,15 @@ def main():
                 loss, parts = rgba_reconstruction_loss(pred, x)
                 loss = (loss + (args.alpha_loss_weight - 3.) * parts["alpha"] +
                         (args.edge_loss_weight - 1.) * parts["edges"])
+                extra = {}
+                if preserve:
+                    penalty, extra = preservation_penalties(
+                        pred, x, z, neutral, rgb_ref,
+                        truth_weight=args.rgb_truth_weight,
+                        teacher_weight=args.rgb_teacher_weight,
+                        latent_weight=args.latent_shift_weight,
+                    )
+                    loss = loss + penalty
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError(f"Nonfinite loss at step {step}: {float(loss)}")
                 (loss / args.grad_accum).backward()
@@ -402,7 +453,7 @@ def main():
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
                 step += 1
-                metrics = {k: round(float(v.detach()), 6) for k, v in parts.items()}
+                metrics = {k: round(float(v.detach()), 6) for k, v in {**parts, **extra}.items()}
                 result = dict(step=step, epoch=epoch, loss=round(float(loss.detach()), 6),
                               grad_norm=round(float(norm), 6), components=metrics,
                               peak_alloc_gib=round(torch.cuda.max_memory_allocated()/2**30, 2),
@@ -416,7 +467,10 @@ def main():
                                     output / "previews" / f"step_{step:06d}",
                                     args.preview_frames,
                                     alpha_weight=args.alpha_loss_weight,
-                                    edge_weight=args.edge_loss_weight)
+                                    edge_weight=args.edge_loss_weight,
+                                    rgb_truth_weight=args.rgb_truth_weight,
+                                    rgb_teacher_weight=args.rgb_teacher_weight,
+                                    latent_shift_weight=args.latent_shift_weight)
                     log("VALIDATION " + json.dumps({"step": step, **vals}))
                     with (output / "validation.jsonl").open("a") as f:
                         f.write(json.dumps({"step": step, **vals}) + "\n")
