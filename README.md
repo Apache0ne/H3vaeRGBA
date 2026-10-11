@@ -1,5 +1,28 @@
 # MiniMax-H3 RGBA research
 
+## Single-GPU 22 GiB VAE workflow
+
+`run_vae_22gb.py` runs **only the H3 visual VAE**: paired Wan-Alpha videos -> audit -> BF16/FP32 mixed reconstruction training -> alpha-only safetensors -> RGBA PNG previews + validation metrics. It never downloads or trains the H3 33B diffusion transformer.
+
+**Google Colab GPU:** select an L4 or another BF16-capable GPU with about 22 GiB VRAM.
+
+```bash
+git clone https://github.com/Apache0ne/H3vaeRGBA.git
+cd H3vaeRGBA
+pip install -r requirements.txt
+python run_vae_22gb.py --resolution 128 --steps 100 --val-every 25 --save-every 25 \
+  --workdir /content/h3rgba_data --output-dir /content/h3rgba_runs/vae22
+```
+
+The script automatically downloads ~1.08 GB of paired compressed videos and loads ~10.4 GB of VAE checkpoint weights into the HF cache (if not already cached). It uses 17-frame clips at 128x128, batch=1, H3's FP32 encoder and BF16 decoder autocast, gradient checkpointing and AdamW on the added alpha weights only. The script has CPU checks but a complete full-checkpoint GPU training pass is **not yet validated**. Even at 128px 22 GiB memory is a target, not a guarantee; stop or drop to 96px if the GPU reports OOM.
+
+For a smaller end-to-end GPU smoke test, use `--steps 2 --val-every 1 --save-every 1`. Check the `previews/step_*/contact_sheet.png` image and `validation.jsonl` against `alpha_step_*.safetensors`. Alpha quality cannot be assumed from a decreasing total loss alone.
+
+If the notebook disconnects, save `--output-dir` on mounted Google Drive and rerun with `--resume --steps 500` (same directory and resolution). `--eval-only` loads `checkpoints/alpha_last.safetensors` and writes held-out visual predictions.
+
+**Limitation:** Training only the widened 4-channel encoder input and alpha output projection may underfit alpha transparency. Further VAE adapters and H3 DiT LoRA fine-tuning are separate development stages; no promise of transparent generative output is made at this stage.
+
+
 **Status:** Stage-1 RGBA-VAE implementation and offline structural tests. **Not GPU-validated or production-ready.** Do not rent an A100 based on these files alone.
 
 Design: widen the causal-video encoder first convolution from RGB (3 channels) to RGBA (4), and widen the ViT decoder output projection from 3 to 4 channels per spatial/temporal patch. The existing 24-channel latent interface stays unchanged. Existing RGB weights are preserved; new alpha weights are zero-initialized. This is a checkpoint-compatible *initialization*, not a trained transparent-video model.
