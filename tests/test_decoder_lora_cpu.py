@@ -24,6 +24,13 @@ def test_decoder_lora_initially_preserves_output_and_backpropagates(tmp_path):
     torch.manual_seed(2026)
     model = tiny_h3()
     alpha_params = configure_stage1(model)
+    # Untrained H3 blocks have exactly ZERO residual gates, intentionally
+    # preventing attention/MLP gradients. Released trained H3 weights should
+    # have nonzero gates; simulate this in the tiny random CPU checkpoint.
+    with torch.no_grad():
+        for block in model.decoder.transformer_blocks:
+            block.scale1.fill_(0.25)
+            block.scale2.fill_(0.25)
     model.eval()
     x = torch.rand(1, 4, 17, 32, 32)
     with torch.no_grad():
