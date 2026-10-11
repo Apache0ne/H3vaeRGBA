@@ -57,3 +57,29 @@ def test_alpha_ablation_detects_when_encoder_ignores_alpha():
         model.encoder.conv_in.weight[:, 3].fill_(0.1)
     _, changed = encode_alpha_ablation(model, x)
     assert changed["alpha_input_latent_mae_delta"] > 0
+
+
+def test_widened_rgb_path_bitwise_preserved_with_alpha_perturbation_zeroed():
+    from diffusers import AutoencoderKLMiniMaxH3
+    from h3rgba.vae import widen_h3_vae
+    torch.manual_seed(17)
+    model = AutoencoderKLMiniMaxH3(
+        latent_channels=24, block_out_channels=(8, 8, 8, 8, 8, 8),
+        layers_per_block=1, norm_num_groups=4, decoder_num_layers=1,
+        decoder_num_attention_heads=2, decoder_attention_head_dim=16,
+        decoder_ffn_mult=2, clip_length=17, token_drop=3,
+    )
+    model.disable_tiling()
+    model.eval()
+    rgb = torch.rand(1, 3, 17, 32, 32)
+    normalized = rgb_to_h3(rgb)
+    with torch.no_grad():
+        original = model._decode_clip(model._encode_clip(normalized).chunk(2, 1)[0])
+    model = widen_h3_vae(model)
+    no_alpha_signal = torch.cat((normalized, torch.zeros_like(normalized[:, :1])), dim=1)
+    with torch.no_grad():
+        expanded = model._decode_clip(model._encode_clip(no_alpha_signal).chunk(2, 1)[0])
+    assert torch.equal(original, expanded[:, :3]), (
+        "Widening must preserve every original pretrained RGB pixel when "
+        "the added alpha encoder channel is zero."
+    )
