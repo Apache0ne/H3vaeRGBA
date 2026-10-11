@@ -1,0 +1,10 @@
+# Pinned upstream reference for AutoencoderKLMiniMaxH3 (2026-10-11).
+# Install a CUDA PyTorch build separately per GPU/runtime, then:
+#   pip install -r requirements.txt
+git+https://github.com/huggingface/diffusers.git@e1a6c67dc724e7c1a5ae8eb0c1964c9f47325217
+accelerate>=1.0
+transformers>=4.56
+safetensors>=0.5
+huggingface_hub>=0.34
+opencv-python-headless>=4.8
+numpy>=1.26
