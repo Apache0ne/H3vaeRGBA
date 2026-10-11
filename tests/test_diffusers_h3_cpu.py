@@ -27,6 +27,7 @@ def test_real_h3_tiny_encoder_decoder_roundtrip_and_gradient():
     model.disable_tiling()
     model = widen_h3_vae(model)
     params = configure_stage1(model)
+    model.enable_gradient_checkpointing()
     x = torch.rand(1, 4, 17, 32, 32, dtype=torch.float32)
     moments = model._encode_clip(rgba_to_vae_input(x))
     latent = moments.chunk(2, dim=1)[0]
