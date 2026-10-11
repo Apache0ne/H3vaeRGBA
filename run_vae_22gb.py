@@ -36,6 +36,14 @@ def arguments():
     p.add_argument("--grad-accum", type=int, default=1)
     p.add_argument("--steps", type=int, default=100)
     p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--decoder-lora-rank", type=int, default=0,
+                   help="Rank 4 or 8 for decoder attention/MLP LoRA; 0 = original alpha-only stage")
+    p.add_argument("--init-alpha", default=None,
+                   help="Initialize from prior Stage-1 alpha_last.safetensors (fresh optimizer, new output dir)")
+    p.add_argument("--alpha-loss-weight", type=float, default=3.,
+                   help="Alpha pixel loss weight, original default 3")
+    p.add_argument("--edge-loss-weight", type=float, default=1.,
+                   help="Alpha Sobel-like spatial edge loss weight, original default 1")
     p.add_argument("--seed", type=int, default=42)
     p.add_argument("--val-samples", type=int, default=3)
     p.add_argument("--val-every", type=int, default=25)
@@ -114,7 +122,8 @@ def save_frames(gt, predicted, path, max_frames=17):
     return str(path / "contact_sheet.png")
 
 
-def validate(vae, loader, device, preview_dir=None, preview_frames=17):
+def validate(vae, loader, device, preview_dir=None, preview_frames=17,
+             alpha_weight=3., edge_weight=1.):
     import torch
     from h3rgba.vae import rgba_to_vae_input, vae_output_to_rgba, rgba_reconstruction_loss
     vae.eval()
@@ -132,7 +141,14 @@ def validate(vae, loader, device, preview_dir=None, preview_frames=17):
                     raise RuntimeError(f"Validation shape mismatch {recon.shape} / {rgba.shape}")
                 pred = vae_output_to_rgba(recon.float())
         loss, parts = rgba_reconstruction_loss(pred, rgba)
+        loss = loss + (alpha_weight - 3.) * parts["alpha"] + (edge_weight - 1.) * parts["edges"]
         entry = {"loss": float(loss), **{name: float(value) for name, value in parts.items()}}
+        # Compare thresholded alpha silhouettes as well as alpha MAE.
+        mask_p = pred[:, 3:4] > 0.5
+        mask_t = rgba[:, 3:4] > 0.5
+        intersection = (mask_p & mask_t).sum().item()
+        union = (mask_p | mask_t).sum().item()
+        entry["alpha_iou"] = float(intersection / union) if union else 1.0
         # Record an easily interpretable held-out alpha pixel MAE.
         entry["alpha_mae"] = float((pred[:, 3:4].clamp(0, 1) - rgba[:, 3:4]).abs().mean())
         stats.append(entry)
@@ -151,11 +167,18 @@ def save_checkpoint(vae, optimizer, output_dir, step, metrics, args):
     save_adapter(vae, checkpoint_dir, step, metrics)
     src = checkpoint_dir / f"alpha_step_{step:06d}.safetensors"
     shutil.copyfile(src, checkpoint_dir / "alpha_last.safetensors")
+    if args.decoder_lora_rank:
+        from safetensors.torch import save_file
+        from h3rgba.decoder_lora import decoder_lora_state
+        lora_path = checkpoint_dir / f"decoder_lora_step_{step:06d}.safetensors"
+        save_file(decoder_lora_state(vae), str(lora_path))
+        shutil.copyfile(lora_path, checkpoint_dir / "decoder_lora_last.safetensors")
     # Trusted local checkpoint only. The optimizer contains only the new
     # alpha parameters; frozen multi-billion parameter weights aren't saved.
     tmp = checkpoint_dir / "optimizer_last.pt.tmp"
     torch.save({"step": step, "optimizer": optimizer.state_dict(),
-                "seed": args.seed, "resolution": args.resolution}, tmp)
+                "seed": args.seed, "resolution": args.resolution,
+                "decoder_lora_rank": args.decoder_lora_rank}, tmp)
     os.replace(tmp, checkpoint_dir / "optimizer_last.pt")
     log(f"CHECKPOINT {src}")
 
@@ -170,6 +193,12 @@ def main():
         raise ValueError("Invalid step or accumulation setting")
     if args.val_samples < 1:
         raise ValueError("Set --val-samples >= 1")
+    if args.decoder_lora_rank < 0 or args.decoder_lora_rank > 32:
+        raise ValueError("LoRA rank must be between 0 and 32")
+    if args.alpha_loss_weight <= 0 or args.edge_loss_weight < 0:
+        raise ValueError("Invalid alpha/edge loss weights")
+    if args.init_alpha and (args.resume or args.eval_only):
+        raise ValueError("Use --init-alpha only for a fresh run, not with --resume or --eval-only")
 
     manifest_path = prepare_manifest(args)
     from train_vae import PairedVideoDataset
@@ -244,6 +273,14 @@ def main():
     vae.quant_conv.float()
     vae.decoder.proj_out.float()
     trainable = configure_stage1(vae)
+    if args.init_alpha:
+        load_stage1_alpha(vae, args.init_alpha)
+        log(f"INITIALIZED_ALPHA_FROM {args.init_alpha}")
+    if args.decoder_lora_rank:
+        from h3rgba.decoder_lora import add_decoder_lora, decoder_lora_parameters
+        count = add_decoder_lora(vae, rank=args.decoder_lora_rank)
+        trainable += decoder_lora_parameters(vae)
+        log(f"DECODER_LORA rank={args.decoder_lora_rank} adapted_linear_layers={count}")
     optimizer = torch.optim.AdamW(trainable, lr=args.lr, weight_decay=0.0)
 
     train_count = sum(p.numel() for p in trainable)
@@ -257,11 +294,19 @@ def main():
         if not path.is_file():
             raise FileNotFoundError(f"No adapter checkpoint found at {path}")
         load_stage1_alpha(vae, path)
+        if args.decoder_lora_rank:
+            from h3rgba.decoder_lora import load_decoder_lora_state
+            lora_last = ckpt_dir / "decoder_lora_last.safetensors"
+            if not lora_last.exists():
+                raise FileNotFoundError(f"LoRA rank is enabled but checkpoint is missing: {lora_last}")
+            load_decoder_lora_state(vae, lora_last)
         if args.resume:
             state_path = ckpt_dir / "optimizer_last.pt"
             state = torch.load(state_path, map_location="cpu", weights_only=True)
             if state["resolution"] != args.resolution:
                 raise ValueError("Resume resolution differs from the saved run")
+            if state.get("decoder_lora_rank", 0) != args.decoder_lora_rank:
+                raise ValueError("LoRA rank differs from the saved run; use --init-alpha with a new output directory")
             optimizer.load_state_dict(state["optimizer"])
             step = int(state["step"])
             log(f"RESUMED_AT_STEP {step}")
@@ -274,7 +319,8 @@ def main():
     torch.cuda.reset_peak_memory_stats()
     if args.eval_only:
         results = validate(vae, val_loader, device,
-                           output / "previews" / "eval_only", args.preview_frames)
+                           output / "previews" / "eval_only", args.preview_frames,
+                           alpha_weight=args.alpha_loss_weight, edge_weight=args.edge_loss_weight)
         log("EVAL " + json.dumps(results))
         return
 
@@ -301,6 +347,8 @@ def main():
                         raise RuntimeError(f"Shape mismatch {decoded.shape} / {x.shape}")
                     pred = vae_output_to_rgba(decoded.float())
                 loss, parts = rgba_reconstruction_loss(pred, x)
+                loss = (loss + (args.alpha_loss_weight - 3.) * parts["alpha"] +
+                        (args.edge_loss_weight - 1.) * parts["edges"])
                 if not bool(torch.isfinite(loss)):
                     raise FloatingPointError(f"Nonfinite loss at step {step}: {float(loss)}")
                 (loss / args.grad_accum).backward()
@@ -323,7 +371,9 @@ def main():
                 if step == 1 or step % args.val_every == 0 or step >= args.steps:
                     vals = validate(vae, val_loader, device,
                                     output / "previews" / f"step_{step:06d}",
-                                    args.preview_frames)
+                                    args.preview_frames,
+                                    alpha_weight=args.alpha_loss_weight,
+                                    edge_weight=args.edge_loss_weight)
                     log("VALIDATION " + json.dumps({"step": step, **vals}))
                     with (output / "validation.jsonl").open("a") as f:
                         f.write(json.dumps({"step": step, **vals}) + "\n")
