@@ -10,6 +10,7 @@ alone cannot supply this codec's alpha branch: diffusion LoRA training on
 jointly encoded latents is a separate stage, NOT claimed here.
 """
 import torch
+from contextlib import nullcontext
 from torch import nn
 from h3rgba.vae import image_net_stats
 from h3rgba.decoder_lora import (
@@ -66,14 +67,14 @@ class DualAlphaCodec(nn.Module):
 
     def train(self, mode=True):
         super().train(mode)
-        # Frozen original VAE remains in inference mode; decoder LoRA still
-        # receives gradients from alpha reconstruction.
-        self.vae.eval()
+        # Keep decoder in train mode for H3's gradient checkpointing.
+        # Encoder is frozen, always run without gradients.
+        self.vae.encoder.eval()
         return self
 
     def encode_rgb(self, rgb):
         with torch.no_grad():
-            with torch.autocast("cuda", enabled=False) if rgb.device.type == "cuda" else torch.no_grad():
+            with torch.autocast("cuda", enabled=False) if rgb.device.type == "cuda" else nullcontext():
                 moments = self.vae._encode_clip(normalize_rgb(rgb).float())
                 return moments.chunk(2, dim=1)[0].detach()
 
@@ -108,7 +109,7 @@ class DualAlphaCodec(nn.Module):
         else:
             decoded = self.vae._decode_clip(z)
         decoded = decoded[:, :, self.vae.frame_pre_padding:]
-        with torch.autocast("cuda", enabled=False) if decoded.device.type == "cuda" else torch.no_grad() if not torch.is_grad_enabled() else torch.enable_grad():
+        with torch.autocast("cuda", enabled=False) if decoded.device.type == "cuda" else nullcontext():
             predicted = self.alpha_head(decoded.float())
         return predicted
 
