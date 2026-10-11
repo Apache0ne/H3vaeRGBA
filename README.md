@@ -1,5 +1,15 @@
 # MiniMax-H3 RGBA research
 
+## Colab import fix: incompatible optional TorchAO
+
+If Python reports `ImportError: cannot import name 'FqnToConfig' from 'torchao.quantization'`, run this **before** importing Diffusers:
+
+```bash
+python tools/colab_compat.py --repair
+```
+
+This checks TorchAO using a separate subprocess, uninstalls it **only when broken**, and verifies `from diffusers import AutoencoderKLMiniMaxH3`. Our BF16 VAE workload does not require TorchAO. If the current notebook kernel has already imported either package, restart the kernel first (or launch the trainer as a new Python process). This is an optional-library dependency mismatch, not a H3 architecture failure.
+
 ## Single-GPU 22 GiB VAE workflow
 
 `run_vae_22gb.py` runs **only the H3 visual VAE**: paired Wan-Alpha videos -> audit -> BF16/FP32 mixed reconstruction training -> alpha-only safetensors -> RGBA PNG previews + validation metrics. It never downloads or trains the H3 33B diffusion transformer.
@@ -10,6 +20,7 @@
 git clone https://github.com/Apache0ne/H3vaeRGBA.git
 cd H3vaeRGBA
 pip install -r requirements.txt
+python tools/colab_compat.py --repair
 python run_vae_22gb.py --resolution 128 --steps 100 --val-every 25 --save-every 25 \
   --workdir /content/h3rgba_data --output-dir /content/h3rgba_runs/vae22
 ```
