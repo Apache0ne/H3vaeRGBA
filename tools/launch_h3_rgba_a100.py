@@ -155,10 +155,22 @@ def prepare_h3_environment(venv):
     launch(["uv","python","install","3.12"])
     if not py.exists():
         launch(["uv","venv","--python","3.12",venv])
-    launch(["uv","pip","install","--python",py,"torch==2.9.0",
+    # Must be matched CUDA builds; torchvision is required by the Qwen3-VL
+    # video processor. Install them in the SAME venv, not Colab's /usr/bin/python.
+    launch(["uv","pip","install","--python",py,
+            "torch==2.9.0","torchvision==0.24.0",
             "--index-url","https://download.pytorch.org/whl/cu128"])
     launch(["uv","pip","install","--python",py,
             "-r",REPO/"requirements-a100-h3.txt"])
+    launch([py,"-c",
+            "import torch, torchvision; "
+            "from transformers import Qwen3VLProcessor; "
+            "from transformers.utils import is_torchvision_available; "
+            "assert is_torchvision_available(); "
+            "assert torch.__version__.split('+')[0]=='2.9.0'; "
+            "assert torchvision.__version__.split('+')[0]=='0.24.0'; "
+            "print('H3_QWEN_PROCESSOR_DEPENDENCIES_OK', "
+            "torch.__version__, torchvision.__version__)"])
     return py
 
 
