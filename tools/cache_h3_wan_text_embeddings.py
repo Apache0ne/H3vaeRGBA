@@ -71,8 +71,10 @@ def run(args):
                       f"{key} cached=True",flush=True)
     finally:
         runner._free_text_encoder(force=True)
+    index_hash=hashlib.sha256(Path(args.joint_index).read_bytes()).hexdigest()
     result={
         "source_index":str(Path(args.joint_index).resolve()),
+        "joint_index_sha256":index_hash,
         "conditioner":"REAL_Qwen3VL_32B_H3_hidden_state_50",
         "prompt_embeds_by_text":computed,
     }
