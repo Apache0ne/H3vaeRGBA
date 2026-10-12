@@ -23,6 +23,8 @@ def arguments():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--workdir", default="/content/h3rgba_data")
     p.add_argument("--manifest", default=None)
+    p.add_argument("--skip-download", action="store_true",
+                   help="Use an already prepared manifest; fail rather than downloading data")
     p.add_argument("--output-dir", default="/content/h3rgba_runs/wan_dual_h3")
     p.add_argument("--resolution", type=int, default=128)
     p.add_argument("--rank", type=int, default=4, help="Decoder transformer LoRA rank")
