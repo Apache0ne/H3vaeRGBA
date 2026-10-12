@@ -203,6 +203,52 @@ def import_upstream(repo):
     return MiniMaxH3Runner
 
 
+
+def validate_qwen_processor(*, offline=True):
+    """Catch missing torchvision or Qwen3-VL processor files BEFORE huge loading.
+
+    The t2va ModularPipeline may silently skip loading an optional-looking
+    component. That leads to a much later NoneType create_mm_token_type_ids
+    error after 3+ minutes of loading GPU weights.
+    """
+    try:
+        import torch
+        import torchvision
+        from transformers import Qwen3VLProcessor
+        from transformers.utils import is_torchvision_available
+        if not is_torchvision_available():
+            raise RuntimeError("Transformers cannot detect torchvision")
+        if not torch.__version__.split("+")[0].startswith("2.9."):
+            raise RuntimeError(
+                f"H3 A100 runner expects torch 2.9.x, got {torch.__version__}"
+            )
+        if not torchvision.__version__.split("+")[0].startswith("0.24."):
+            raise RuntimeError(
+                f"H3 A100 runner expects torchvision 0.24.x, got "
+                f"{torchvision.__version__}"
+            )
+        processor=Qwen3VLProcessor.from_pretrained(
+            MODEL_ID,subfolder="processor",local_files_only=offline,
+        )
+        if not callable(getattr(processor,"create_mm_token_type_ids",None)):
+            raise RuntimeError("Qwen3-VL processor missing create_mm_token_type_ids")
+        print("H3_QWEN3VL_PROCESSOR_VERIFIED",
+              json.dumps({"torch":torch.__version__,
+                          "torchvision":torchvision.__version__,
+                          "processor":type(processor).__name__}),flush=True)
+    except Exception as exc:
+        raise RuntimeError(
+            "H3 Qwen3-VL processor preflight failed BEFORE loading the 33B "
+            "diffusion model. In /content/h3_a100_venv install the matching "
+            "torchvision CUDA wheel: "
+            "uv pip install --python /content/h3_a100_venv/bin/python "
+            "torchvision==0.24.0 "
+            "--index-url https://download.pytorch.org/whl/cu128 ; "
+            "then retry, preserving the existing H3 model cache. "
+            f"Original failure: {type(exc).__name__}: {exc}"
+        ) from exc
+
+
 def generate(args):
     import gc
     import psutil
@@ -217,6 +263,9 @@ def generate(args):
     if not torch.cuda.is_bf16_supported():
         raise RuntimeError("BF16 GPU required")
 
+    # Processor metadata and tokenizer are tiny compared with the 33B model.
+    # Validate them before any large transformer/conditioner weight allocation.
+    validate_qwen_processor(offline=True)
     Runner=import_upstream(args.upstream_repo)
     output=Path(args.output_dir).resolve()
     output.mkdir(parents=True,exist_ok=True)
