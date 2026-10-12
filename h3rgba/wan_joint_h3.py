@@ -111,6 +111,29 @@ class WanJointH3Codec(nn.Module):
         """Inference ONLY requires H3's native 24-channel latent output."""
         return self.decode_joint_rgb(z_joint),self.decode_joint_alpha(z_joint)
 
+    def decode_native_h3_latents(self,raw_joint):
+        """Decode FULL H3 generated joint latent, not 17-frame training window.
+
+        Original H3 native VAE.decode supplies temporal chunking/padding for
+        124+ output frames. Both decoders receive the same 24ch stream.
+        """
+        if raw_joint.ndim!=5 or raw_joint.shape[1]!=24:
+            raise ValueError("Expected native generated H3 joint 24-channel video")
+        with temporarily_disable_decoder_lora(self.dual.vae):
+            with (torch.autocast("cuda",dtype=torch.bfloat16)
+                  if raw_joint.device.type=="cuda" else nullcontext()):
+                rgb=self.dual.vae.decode(raw_joint,return_dict=False)[0]
+        with (torch.autocast("cuda",dtype=torch.bfloat16)
+              if raw_joint.device.type=="cuda" else nullcontext()):
+            alpha_latent=self.alpha_latent_from_joint(raw_joint)
+            z_alpha=self.dual.merge_latents(raw_joint,alpha_latent)
+            decoded_alpha=self.dual.vae.decode(z_alpha,return_dict=False)[0]
+        rgb=denormalize_rgb(rgb.float()).clamp(0,1)
+        alpha=self.dual.alpha_head(decoded_alpha.float()).clamp(0,1)
+        if rgb.shape[2:]!=alpha.shape[2:] or rgb.shape[1]!=3 or alpha.shape[1]!=1:
+            raise RuntimeError("Native Wan RGB and alpha video shapes do not agree")
+        return rgb,alpha
+
     def forward(self,rgba,*,background=None):
         z_joint,zrgb,zalpha=self.encode_joint(rgba,background=background)
         rgb,alpha=self.decode_joint(z_joint)
