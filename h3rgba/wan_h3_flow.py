@@ -1,6 +1,8 @@
 """MiniMax-H3 data-ward rectified-flow LoRA loss on Wan shared RGB+A latents.
 
 z_t = t*z_data+(1-t)*noise, velocity target = z_data-noise.
+t = 1 - sigma, sigma = 12*u/(1+11*u), u ~ Uniform(.02,.98).
+This matches native H3 shifted VIDEO sampling, not Wan's sigma direction.
 Uses actual H3 packed text/video rotary layout and original 24ch tokens.
 Paired matting data have no audio, so this is VIDEO-only fine-tuning of H3's
 joint video/audio backbone. Native joint audio/video fine-tuning is untested.
@@ -9,11 +11,25 @@ import torch
 from torch import nn
 
 
+def shifted_video_clean_time(u, shift=12.0):
+    """H3's inference schedule: sigma=shift*u/(1+(shift-1)*u), t=1-sigma.
+
+    H3 transformer conditions on DATA-WARD clean time, NOT sigma. During
+    training sample uniform scheduler progress u and match the inference
+    distribution. Video shift is 12.0; no audio latents exist in this path.
+    """
+    u=torch.as_tensor(u,dtype=torch.float32)
+    if not torch.all((u>0)&(u<1)) or shift<=0:
+        raise ValueError("Schedule progress must be (0,1) and shift > 0")
+    return 1.0-(shift*u)/(1.0+(shift-1.0)*u)
+
+
 def rectified_flow_batch(clean, *, t=None, noise=None, generator=None):
     if clean.ndim!=5 or clean.shape[1]!=24 or clean.shape[0]!=1:
         raise ValueError("Expected one [1,24,F,H,W] H3 joint sample")
     if t is None:
-        t=torch.rand((),device=clean.device,generator=generator)*.96+.02
+        u=torch.rand((),device=clean.device,generator=generator)*.96+.02
+        t=shifted_video_clean_time(u)
     t=torch.as_tensor(t,device=clean.device,dtype=torch.float32).reshape(())
     if not 0<float(t)<1:
         raise ValueError("H3 clean-time t must be in (0,1)")
