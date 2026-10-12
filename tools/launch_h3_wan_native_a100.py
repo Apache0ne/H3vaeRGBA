@@ -53,6 +53,9 @@ def generation_is_current(report_path, trained_dit_lora):
             prior.get("dit_lora_hash")==file_sha256(trained_dit_lora)
             and Path(prior["rgb_audio_mp4"]).is_file()
             and Path(prior["generated_latents"]).is_file()
+            and prior.get("generated_latents_sha256")==file_sha256(
+                prior["generated_latents"]
+            )
         )
     except (OSError, ValueError, KeyError, TypeError):
         return False
