@@ -223,6 +223,7 @@ def main():
         ckpt=torch.load(resume_file,map_location="cpu",weights_only=True)
         want={
             "rank":args.rank,"lr":args.lr,"seed":args.seed,
+            "weight_mode":args.weight_mode,
             "joint_index_hash":filehash(args.joint_index),
             "prompts_hash":filehash(args.prompts_json),
         }
