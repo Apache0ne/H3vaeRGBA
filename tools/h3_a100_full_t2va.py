@@ -45,6 +45,53 @@ PATTERNS = (
 )
 
 
+
+def cached_t2va_weights_present(hf_home=None):
+    """Conservatively detect existing complete tensor shards without download.
+
+    Avoids demanding an ADDITIONAL 155GB of free space after 140+GB weights
+    have already been downloaded. This is NOT cryptographic verification.
+    """
+    home = Path(hf_home or os.environ.get("HF_HOME") or
+                Path.home()/".cache/huggingface").expanduser()
+    snapshots = home/"hub/models--MiniMaxAI--MiniMax-H3/snapshots"
+    if not snapshots.is_dir():
+        return False
+    for snap in snapshots.iterdir():
+        if not snap.is_dir():
+            continue
+        complete = True
+        for name in ("transformer","text_encoder","vae","audio_vae"):
+            folder = snap/name
+            if not folder.is_dir() or not (folder/"config.json").is_file():
+                complete = False
+                break
+            index_files = sorted(folder.glob("*.safetensors.index.json"))
+            if index_files:
+                for index in index_files:
+                    try:
+                        entries = set(json.loads(index.read_text())["weight_map"].values())
+                    except (OSError,ValueError,KeyError):
+                        complete=False
+                        break
+                    if not entries or any(
+                        not (folder/file).is_file() or
+                        (folder/file).stat().st_size < 1024
+                        for file in entries
+                    ):
+                        complete=False
+                        break
+            elif not any(p.is_file() and p.stat().st_size > 1024
+                         for p in folder.glob("*.safetensors")):
+                complete=False
+                break
+            if not complete:
+                break
+        if complete:
+            return True
+    return False
+
+
 def inspect_host(*, gpu_gib=None, ram_available_gb=None,
                  ram_total_gb=None, disk_free_gb=None,
                  phase="download", disk_path=None):
@@ -256,7 +303,12 @@ def main():
         p.error("Seconds must be 5..15 and steps >=3")
     output=Path(args.output_dir)
     output.mkdir(parents=True,exist_ok=True)
-    proof=inspect_host(phase=("generate" if args.generate else args.disk_phase))
+    has_cached_weights = cached_t2va_weights_present()
+    selected_phase = (
+        "generate" if args.generate or has_cached_weights else args.disk_phase
+    )
+    proof=inspect_host(phase=selected_phase)
+    proof["cached_t2va_weights_present"] = has_cached_weights
     (output/"h3_a100_preflight.json").write_text(json.dumps(proof,indent=2))
     print("A100_PHASED_RESOURCE_PREFLIGHT",json.dumps(proof,indent=2),flush=True)
     if args.preflight_only:
@@ -264,8 +316,15 @@ def main():
     if not proof["can_proceed"] and not args.skip_resource_guard:
         raise SystemExit("RESOURCE_PREFLIGHT_BLOCKED: inspect h3_a100_preflight.json")
     if args.download_only:
+        if has_cached_weights:
+            print("T2VA_WEIGHT_SHARDS_ALREADY_CACHED: skipping full download",flush=True)
+            return
         print("SNAPSHOT",download_t2va(),flush=True)
         return
+    if not has_cached_weights:
+        raise RuntimeError("Full H3 T2VA weights are not completely cached. "
+                           "Run --download-only with >=155 GB available on "
+                           "the HF_HOME filesystem (scratch if needed).")
     report=generate(args)
     print("DONE",json.dumps({"generated_mp4":report["generated_rgb_audio_video"],
                               "peak_vram_gib":report["gpu_memory_reserved_peak_gib"],
