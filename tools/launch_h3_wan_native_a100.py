@@ -42,6 +42,22 @@ from tools.validate_h3_wan_cache import (
 REPO=Path(__file__).resolve().parent.parent
 
 
+def generation_is_current(report_path, trained_dit_lora):
+    """A JSON file alone never proves that the CURRENT LoRA generated the video."""
+    report_path=Path(report_path)
+    if not report_path.is_file():
+        return False
+    try:
+        prior=json.loads(report_path.read_text())
+        return (
+            prior.get("dit_lora_hash")==file_sha256(trained_dit_lora)
+            and Path(prior["rgb_audio_mp4"]).is_file()
+            and Path(prior["generated_latents"]).is_file()
+        )
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
 def run(args):
     out=Path(args.run_root)
     out.mkdir(parents=True,exist_ok=True)
@@ -197,20 +213,10 @@ def run(args):
             "--steps",str(args.generate_steps),
             "--seed",str(args.seed),"--prompt",args.prompt]
     generation_report=phases["generation"]/"wan_h3_generation.json"
-    if generation_report.is_file():
-        try:
-            prior=json.loads(generation_report.read_text())
-            valid = (
-                prior.get("dit_lora_hash")==file_sha256(dit_best)
-                and Path(prior["rgb_audio_mp4"]).is_file()
-                and Path(prior["generated_latents"]).is_file()
-            )
-        except (OSError, ValueError, KeyError, TypeError):
-            valid=False
-        if not valid:
-            print("[WAN STAGE 5] Previous generation is stale or incomplete; "
-                  "rerunning with CURRENT trained DiT adapter",flush=True)
-            generation_report.unlink()
+    if generation_report.is_file() and not generation_is_current(generation_report,dit_best):
+        print("[WAN STAGE 5] Previous generation is stale or incomplete; "
+              "rerunning with CURRENT trained DiT adapter",flush=True)
+        generation_report.unlink()
     if not generation_report.is_file():
         launch(native+["--generate-only"])
     print("[WAN STAGE 5 COMPLETE] Native denoised joint H3 latent captured",flush=True)
