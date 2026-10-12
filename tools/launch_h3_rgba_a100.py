@@ -23,6 +23,7 @@ IMPORTANT:
 import argparse
 import json
 import os
+from collections import deque
 import shutil
 import subprocess
 import sys
@@ -34,8 +35,39 @@ UPSTREAM_URL = "https://github.com/animede/Diffusers_minimax-h3.git"
 
 
 def launch(command, *, cwd=None, env=None):
-    print("\n>>>"," ".join(map(str,command)),flush=True)
-    subprocess.run([str(x) for x in command],cwd=cwd,env=env,check=True)
+    """Stream child stdout+stderr to Colab AND persist the real failure.
+
+    Colab's outer CalledProcessError hides the meaningful child traceback.
+    The rolling failure excerpt and launcher.log identify the failing stage.
+    """
+    cmd=[str(x) for x in command]
+    label=" ".join(cmd)
+    log_path=Path(os.environ.get(
+        "H3_E2E_LOG_PATH", "/content/h3_rgba_end_to_end/launcher.log"))
+    log_path.parent.mkdir(parents=True,exist_ok=True)
+    print("\n>>>",label,flush=True)
+    tail=deque(maxlen=65)
+    with log_path.open("a",encoding="utf-8") as log:
+        log.write("\n>>> "+label+"\n")
+        log.flush()
+        process=subprocess.Popen(
+            cmd,cwd=cwd,env=env,stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,text=True,errors="replace",bufsize=1
+        )
+        for line in process.stdout:
+            print(line,end="",flush=True)
+            log.write(line)
+            log.flush()
+            tail.append(line.rstrip())
+        rc=process.wait()
+        log.write(f"EXIT_CODE={rc}\n")
+    if rc:
+        detail="\n".join(tail)
+        raise RuntimeError(
+            f"Internal H3 stage failed with exit code {rc}: {label}\n"
+            f"Saved log: {log_path}\n"
+            f"CHILD_PROCESS_ERROR_TAIL:\n{detail}"
+        )
 
 
 def best_vae_lora(drive, local):
@@ -146,6 +178,8 @@ def ensure_full_h3_generation(args):
     py=prepare_h3_environment(Path(args.h3_venv))
     cmd=[py,REPO/"tools/h3_a100_full_t2va.py",
          "--upstream-repo",upstream,"--output-dir",output]
+    if args.hf_home:
+        cmd+=["--hf-home",args.hf_home]
     launch(cmd+["--preflight-only"])
     proof=json.loads((output/"h3_a100_preflight.json").read_text())
     if not proof["can_proceed"]:
@@ -268,6 +302,9 @@ def main():
     p.add_argument("--upstream-repo",default="/content/Diffusers_minimax-h3")
     p.add_argument("--h3-venv",default="/content/h3_a100_venv")
     p.add_argument("--drive-root",default="/content/drive/MyDrive")
+    p.add_argument("--hf-home",default=None,
+                   help="Optional HF cache on large scratch drive; do not "
+                        "change after partially downloading weights")
     p.add_argument("--width",type=int,default=960)
     p.add_argument("--height",type=int,default=544)
     p.add_argument("--seconds",type=float,default=5.)
@@ -284,6 +321,12 @@ def main():
     args=p.parse_args()
     root=Path(args.run_root)
     root.mkdir(parents=True,exist_ok=True)
+    os.environ["H3_E2E_LOG_PATH"]=str(root/"launcher.log")
+    if args.hf_home:
+        cache_root=Path(args.hf_home).expanduser().resolve()
+        cache_root.mkdir(parents=True,exist_ok=True)
+        os.environ["HF_HOME"]=str(cache_root)
+        print("H3_HUGGINGFACE_CACHE_HOME",cache_root,flush=True)
     drive=Path(args.drive_root) if args.drive_root else None
     if drive and not drive.is_dir():
         if args.dry_run:
