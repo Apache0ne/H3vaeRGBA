@@ -2,10 +2,11 @@
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from tools.h3_a100_full_t2va import inspect_host, import_upstream, PATTERNS, MODEL_ID, cached_t2va_weights_present
+from tools.h3_a100_full_t2va import inspect_host, import_upstream, PATTERNS, MODEL_ID, cached_t2va_weights_present, validate_qwen_processor
 
 
 def test_a100_80gb_host_ram_53gb_is_allowed_with_phased_quantized_loading():
@@ -90,3 +91,21 @@ def test_invalid_disk_guard_phase_is_rejected():
     with pytest.raises(ValueError):
         inspect_host(gpu_gib=79.1,ram_total_gb=167,
                      ram_available_gb=160,disk_free_gb=20,phase="unknown")
+
+
+def test_qwen_processor_fails_early_on_missing_torchvision(monkeypatch):
+    # No giant model download, processor data, or CUDA needed.
+    # Simulate missing torchvision even when PyTorch itself is installed.
+    monkeypatch.setitem(sys.modules, "torchvision", None)
+    with pytest.raises(RuntimeError, match="preflight failed BEFORE loading"):
+        validate_qwen_processor()
+
+
+def test_full_h3_requirements_pin_cuda_compatible_torchvision():
+    requirements = (Path(__file__).resolve().parents[1] /
+                    "requirements-a100-h3.txt").read_text()
+    launcher = (Path(__file__).resolve().parents[1] /
+                "tools/launch_h3_rgba_a100.py").read_text()
+    assert "torchvision==0.24.0" in requirements
+    assert '"torch==2.9.0","torchvision==0.24.0"' in launcher
+    assert "https://download.pytorch.org/whl/cu128" in launcher
