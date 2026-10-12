@@ -85,10 +85,15 @@ def validate_text_cache(index_path, prompts_json):
     if prompts.get("conditioner") != "REAL_Qwen3VL_32B_H3_hidden_state_50":
         raise RuntimeError("Wrong H3 text-conditioning source")
     mapping = prompts.get("prompt_embeds_by_text", {})
+    hashes = prompts.get("prompt_embeds_sha256", {})
     for row in index.get("samples", []):
         path = mapping.get(row["caption"])
         if not path or not Path(path).is_file():
             raise RuntimeError(f"Missing REAL Qwen prompt embedding for {row['id']}")
+        if hashes.get(row["caption"]) != sha256(path):
+            raise RuntimeError(
+                f"STALE_TEXT_CACHE: Qwen embedding for {row['id']} changed or is corrupt"
+            )
     return len(mapping)
 
 
