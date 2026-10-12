@@ -34,6 +34,9 @@ _sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 
 from tools.launch_h3_rgba_a100 import launch
+from tools.validate_h3_wan_cache import (
+    validate_joint_cache, validate_text_cache, sha256 as file_sha256,
+)
 
 
 REPO=Path(__file__).resolve().parent.parent
@@ -121,6 +124,16 @@ def run(args):
 
     print("[WAN STAGE 2] Encode joint 24-channel latent video targets",flush=True)
     index=phases["latents"]/"index.json"
+    cache_inputs = dict(
+        bridge=bridge, dual=adapted, base_lora=old,
+        manifest=manifest, captions=phases["captions"],
+    )
+    if index.is_file():
+        try:
+            validate_joint_cache(index, **cache_inputs)
+        except (RuntimeError, FileNotFoundError, KeyError, ValueError) as exc:
+            print("[WAN STAGE 2] Invalid cached latents, rebuilding:", exc, flush=True)
+            index.unlink()
     if not index.is_file():
         launch([sys.executable,"-u",REPO/"tools/cache_h3_wan_joint_targets.py",
                 "--manifest",manifest,
@@ -128,20 +141,31 @@ def run(args):
                 "--joint-bridge",bridge,"--joint-dual",adapted,
                 "--base-vae-lora",old,
                 "--output-dir",phases["latents"],
-                "--resolution","128","--hidden","128","--seed",str(args.seed)])
-    print("[WAN STAGE 2 COMPLETE] Genuine fused video latents ready",flush=True)
+                "--resolution",str(args.dit_cache_resolution),
+                "--hidden","128","--seed",str(args.seed)])
+    cache_counts=validate_joint_cache(index, **cache_inputs)
+    print("[WAN STAGE 2 COMPLETE] Verified fused video latents",
+          json.dumps(cache_counts),flush=True)
 
     py=Path(args.a100_python)
     if not py.is_file():
         raise FileNotFoundError("Need existing isolated A100 H3 Python 3.12: "+str(py))
     print("[WAN STAGE 3] Cache real caption Qwen3-VL-32B embeddings",flush=True)
     prompts=phases["text"]/"prompts.json"
+    if prompts.is_file():
+        try:
+            validate_text_cache(index, prompts)
+        except (RuntimeError, FileNotFoundError, KeyError, ValueError) as exc:
+            print("[WAN STAGE 3] Invalid cached text prompts, rebuilding:", exc, flush=True)
+            prompts.unlink()
     if not prompts.is_file():
         launch([py,"-u",REPO/"tools/cache_h3_wan_text_embeddings.py",
                 "--joint-index",index,
                 "--output-dir",phases["text"],
                 "--upstream-repo",args.upstream_repo])
-    print("[WAN STAGE 3 COMPLETE] Qwen embeddings saved; GPU TE process released",flush=True)
+    count=validate_text_cache(index,prompts)
+    print("[WAN STAGE 3 COMPLETE] Verified REAL Qwen embeds:",
+          count,"unique prompts; GPU TE process released",flush=True)
 
     print("[WAN STAGE 4] Train H3 33B DiT LoRA on JOINT latents",flush=True)
     config=[py,"-u",REPO/"train_h3_wan_dit_lora.py",
@@ -172,7 +196,22 @@ def run(args):
             "--seconds",str(args.seconds),
             "--steps",str(args.generate_steps),
             "--seed",str(args.seed),"--prompt",args.prompt]
-    if not (phases["generation"]/"wan_h3_generation.json").is_file():
+    generation_report=phases["generation"]/"wan_h3_generation.json"
+    if generation_report.is_file():
+        try:
+            prior=json.loads(generation_report.read_text())
+            valid = (
+                prior.get("dit_lora_hash")==file_sha256(dit_best)
+                and Path(prior["rgb_audio_mp4"]).is_file()
+                and Path(prior["generated_latents"]).is_file()
+            )
+        except (OSError, ValueError, KeyError, TypeError):
+            valid=False
+        if not valid:
+            print("[WAN STAGE 5] Previous generation is stale or incomplete; "
+                  "rerunning with CURRENT trained DiT adapter",flush=True)
+            generation_report.unlink()
+    if not generation_report.is_file():
         launch(native+["--generate-only"])
     print("[WAN STAGE 5 COMPLETE] Native denoised joint H3 latent captured",flush=True)
 
@@ -210,6 +249,9 @@ def main():
     p.add_argument("--vae-steps",type=int,default=1000)
     p.add_argument("--dit-steps",type=int,default=1000)
     p.add_argument("--dit-rank",type=int,default=8)
+    p.add_argument("--dit-cache-resolution",type=int,default=256,
+                   help="Resolution of joint latents cached for H3 DiT training; "
+                        "independent of 128px VAE training. Requires enough A100 VRAM.")
     p.add_argument("--dit-weight-mode",choices=("bf16","int8"),default="bf16",
                    help="BF16 training fits 80GB-class GPUs in principle; int8 "
                         "training may lack autograd support")
@@ -230,6 +272,8 @@ def main():
     args=p.parse_args()
     if min(args.vae_steps,args.dit_steps,args.dit_rank)<2:
         p.error("Two optimizer steps minimum per training stage")
+    if args.dit_cache_resolution<128 or args.dit_cache_resolution%32:
+        p.error("--dit-cache-resolution must be >=128 and divisible by 32")
     run(args)
 
 
