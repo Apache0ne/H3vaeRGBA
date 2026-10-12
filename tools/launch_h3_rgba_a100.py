@@ -34,39 +34,116 @@ REPO = Path(__file__).resolve().parent.parent
 UPSTREAM_URL = "https://github.com/animede/Diffusers_minimax-h3.git"
 
 
-def launch(command, *, cwd=None, env=None):
-    """Stream child stdout+stderr to Colab AND persist the real failure.
+def _status_snapshot(*, phase, pid, started, current=None):
+    """Read-only heartbeat even while a subprocess emits no output."""
+    import time
+    snapshot = {
+        "phase": phase, "pid": pid,
+        "elapsed_seconds": int(time.monotonic()-started),
+        "current_command": current,
+    }
+    try:
+        result=subprocess.run(
+            ["ps","-o","stat=,%cpu=,%mem=,rss=,etime=","-p",str(pid)],
+            capture_output=True,text=True,timeout=4,
+        )
+        snapshot["child_process"]=result.stdout.strip() or "not running"
+    except Exception as exc:
+        snapshot["child_process_error"]=str(exc)
+    try:
+        result=subprocess.run(
+            ["nvidia-smi","--query-gpu=memory.used,utilization.gpu",
+             "--format=csv,noheader,nounits"],
+            capture_output=True,text=True,timeout=5,
+        )
+        snapshot["gpu_used_mib_and_util_percent"]=result.stdout.strip() or "unavailable"
+    except Exception as exc:
+        snapshot["gpu_error"]=str(exc)
+    try:
+        snapshot["free_gb_content"]=round(shutil.disk_usage("/content").free/1e9,2)
+    except OSError:
+        pass
+    return snapshot
 
-    Colab's outer CalledProcessError hides the meaningful child traceback.
-    The rolling failure excerpt and launcher.log identify the failing stage.
-    """
+
+def launch(command, *, cwd=None, env=None, heartbeat_seconds=30):
+    """Stream child output while giving periodic progress even when silent."""
+    import threading
+    import time
+
     cmd=[str(x) for x in command]
     label=" ".join(cmd)
     log_path=Path(os.environ.get(
         "H3_E2E_LOG_PATH", "/content/h3_rgba_end_to_end/launcher.log"))
     log_path.parent.mkdir(parents=True,exist_ok=True)
+    status_path=log_path.with_name("launcher_status.json")
+    phase=Path(cmd[0]).name+" "+(
+        Path(cmd[1]).name if len(cmd)>1 else ""
+    )
     print("\n>>>",label,flush=True)
-    tail=deque(maxlen=65)
+    tail=deque(maxlen=80)
+    started=time.monotonic()
+    lock=threading.Lock()
     with log_path.open("a",encoding="utf-8") as log:
+        def emit(message, *, track=False):
+            with lock:
+                print(message,flush=True)
+                log.write(message+"\n")
+                log.flush()
+                if track:
+                    tail.append(message)
         log.write("\n>>> "+label+"\n")
         log.flush()
         process=subprocess.Popen(
             cmd,cwd=cwd,env=env,stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,text=True,errors="replace",bufsize=1
+            stderr=subprocess.STDOUT,text=True,errors="replace",bufsize=1,
         )
-        for line in process.stdout:
-            print(line,end="",flush=True)
-            log.write(line)
-            log.flush()
-            tail.append(line.rstrip())
-        rc=process.wait()
-        log.write(f"EXIT_CODE={rc}\n")
+        def pump_output():
+            for line in process.stdout:
+                with lock:
+                    print(line,end="",flush=True)
+                    log.write(line)
+                    log.flush()
+                    tail.append(line.rstrip())
+        pump=threading.Thread(target=pump_output,daemon=True)
+        pump.start()
+        emit("[H3 STAGE START] "+phase+" | PID="+str(process.pid))
+        while True:
+            try:
+                rc=process.wait(timeout=heartbeat_seconds)
+                break
+            except subprocess.TimeoutExpired:
+                status=_status_snapshot(
+                    phase=phase,pid=process.pid,started=started,
+                    current=label[:500]
+                )
+                temp=status_path.with_suffix(".json.tmp")
+                temp.write_text(json.dumps(status,indent=2))
+                os.replace(temp,status_path)
+                emit("[H3 HEARTBEAT] "+json.dumps(status))
+                free=status.get("free_gb_content")
+                if free is not None and free<20:
+                    emit("[H3 DISK WARNING] /content has only "
+                         +str(free)+" GB free; use scratch storage "
+                         "for subsequent extraction.")
+        pump.join(timeout=30)
+        status=_status_snapshot(
+            phase="completed" if rc==0 else "failed",
+            pid=process.pid,started=started,current=label[:500]
+        )
+        status["exit_code"]=rc
+        temp=status_path.with_suffix(".json.tmp")
+        temp.write_text(json.dumps(status,indent=2))
+        os.replace(temp,status_path)
+        emit("[H3 STAGE END] "+phase+
+             " | exit="+str(rc)+
+             " | seconds="+str(round(time.monotonic()-started,1)))
     if rc:
-        detail="\n".join(tail)
         raise RuntimeError(
             f"Internal H3 stage failed with exit code {rc}: {label}\n"
             f"Saved log: {log_path}\n"
-            f"CHILD_PROCESS_ERROR_TAIL:\n{detail}"
+            f"Status: {status_path}\n"
+            f"CHILD_PROCESS_ERROR_TAIL:\n"+"\n".join(tail)
         )
 
 
@@ -366,8 +443,11 @@ def main():
 
     # Phase A: real 33B DiT generation in isolated venv. After child process
     # exits, its GPU allocations are released before VAE sidecar training.
+    print("[H3 PHASE A/3] PRETRAINED 33B H3 RGB+audio diffusion",flush=True)
     rgb_video=ensure_full_h3_generation(args)
+    print("[H3 PHASE A/3 COMPLETE] RGB MP4: "+str(rgb_video),flush=True)
 
+    print("[H3 PHASE B/3] PREPARE paired data + VAE LoRA + alpha diffusion",flush=True)
     # Phase B: VAE-only environment with pinned release, never mix its
     # diffusers/TorchAO versions with the external 33B inference environment.
     launch([sys.executable,"-m","pip","install","-q",
@@ -379,6 +459,8 @@ def main():
     adapter=ensure_vae_lora(args,workdir,drive)
     sidecar=ensure_alpha_sidecar(args,adapter,manifest,drive)
 
+    print("[H3 PHASE B/3 COMPLETE] Alpha model: "+str(sidecar),flush=True)
+    print("[H3 PHASE C/3] SAMPLE generated alpha, export ProRes4444",flush=True)
     # Phase C: no GT alpha; sample alpha latents from noise conditioned on
     # real H3 generated RGB, decode LoRA in overlapped 17-frame windows.
     output=root/"generated_transparent_video"
@@ -405,6 +487,7 @@ def main():
         shutil.copy2(report["prores4444_mov"],backup/"generated_rgba.mov")
         shutil.copy2(source,backup/"end_to_end_report.json")
         print("PERSISTENT_GENERATED_RGBA",backup/"generated_rgba.mov",flush=True)
+    print("[H3 PHASE C/3 COMPLETE] RGBA video exported",flush=True)
     print("END_TO_END_RGBA_GENERATION_COMPLETED",report["prores4444_mov"],flush=True)
     print("NOTE: alpha sidecar quality must still be judged against "
           "independent video matte ground truth.",flush=True)
