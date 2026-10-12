@@ -88,6 +88,7 @@ def test_text_embeddings_are_bound_to_exact_latent_index(tmp_path):
         "conditioner": "REAL_Qwen3VL_32B_H3_hidden_state_50",
         "joint_index_sha256": sha256(paths["index"]),
         "prompt_embeds_by_text": {"a cat": str(a), "a dog": str(b)},
+        "prompt_embeds_sha256": {"a cat": sha256(a), "a dog": sha256(b)},
     }))
     assert validate_text_cache(paths["index"], text) == 2
     data = json.loads(paths["index"].read_text())
@@ -155,3 +156,20 @@ def test_corrupted_cached_latent_is_detected_before_33b_training(tmp_path):
     (tmp_path/"latent.pt").write_bytes(b"modified latent tensors")
     with pytest.raises(RuntimeError,match="tensor for clip-1 changed"):
         validate_joint_cache(paths["index"],**kwargs)
+
+
+def test_corrupt_real_qwen_embeddings_fail_before_training(tmp_path):
+    paths=fixtures(tmp_path)
+    e=tmp_path/"qwen.pt"
+    e.write_bytes(b"Qwen tensor 5120D")
+    text=tmp_path/"prompts.json"
+    text.write_text(json.dumps({
+        "conditioner":"REAL_Qwen3VL_32B_H3_hidden_state_50",
+        "joint_index_sha256":sha256(paths["index"]),
+        "prompt_embeds_by_text":{"a cat":str(e),"a dog":str(e)},
+        "prompt_embeds_sha256":{"a cat":sha256(e),"a dog":sha256(e)},
+    }))
+    assert validate_text_cache(paths["index"],text)==2
+    e.write_bytes(b"BAD QWEN TENSOR")
+    with pytest.raises(RuntimeError,match="STALE_TEXT_CACHE"):
+        validate_text_cache(paths["index"],text)
