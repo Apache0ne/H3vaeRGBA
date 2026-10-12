@@ -249,6 +249,8 @@ def main():
     p=argparse.ArgumentParser(description=__doc__,
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     p.add_argument("--preflight-only",action="store_true")
+    p.add_argument("--workflow-only",action="store_true",
+                   help="Load H3 ModularPipeline metadata, inspect t2va definition; no model weights")
     p.add_argument("--force-resource-override",action="store_true",
                    help="Dangerous: bypass host-RAM/disk guard; may be OOM killed")
     p.add_argument("--output-dir",default="/content/h3_real_diffusion_probe")
@@ -288,6 +290,19 @@ def main():
         report["status"]="PREFLIGHT_ONLY_NO_WEIGHTS_LOADED"
         (output/"h3_full_diffusion_report.json").write_text(json.dumps(report,indent=2))
         print("PREFLIGHT_COMPLETE_NO_MODEL_DOWNLOAD",flush=True)
+        return
+    if args.workflow_only:
+        from diffusers import ModularPipeline
+        pipeline = ModularPipeline.from_pretrained(MODEL,workflow="t2va")
+        docs = str(pipeline.doc)
+        if "prompt" not in docs:
+            raise RuntimeError("Loaded H3 t2va workflow metadata has no prompt input")
+        report["status"]="H3_REAL_MODULAR_WORKFLOW_METADATA_VERIFIED_NO_WEIGHTS"
+        report["workflow_doc"]=docs[:12000]
+        (output/"h3_full_diffusion_report.json").write_text(json.dumps(report,indent=2))
+        (output/"h3_t2va_workflow_doc.txt").write_text(docs)
+        print("H3_T2VA_WORKFLOW_METADATA_OK (no transformer weights loaded)",flush=True)
+        print(docs[:3000],flush=True)
         return
     if not proof["can_attempt_official_int8_streamed_inference"]:
         if not args.force_resource_override:
