@@ -57,24 +57,34 @@ def run(args):
             for number,prompt in enumerate(prompts,1):
                 key=hashlib.sha256(prompt.encode()).hexdigest()[:32]
                 path=directory/f"{key}.pt"
-                if not path.is_file():
+                if args.force_reencode or not path.is_file():
                     emb,tags=_encode_h3_prompt(
                         runner._pipe,prompt,None,
                         device=runner._encode_device,dtype=torch.bfloat16)
                     if (emb.ndim!=3 or emb.shape[0]!=1 or emb.shape[2]!=5120
                         or tags.shape!=(emb.shape[1],)):
                         raise RuntimeError("Qwen output does not match native H3 conditioning")
+                    # Replace only fully serialized tensors. A crash must never
+                    # leave a partial file that the next run treats as a hit.
+                    pending=path.with_suffix(".pt.partial")
                     torch.save({"embeds":emb.detach().cpu().half(),
-                                "tags":tags.cpu().long()},path)
+                                "tags":tags.cpu().long()},pending)
+                    os.replace(pending,path)
                 computed[prompt]=str(path)
                 print(f"QWEN_PROMPT_EMBEDS {number}/{len(prompts)} "
                       f"{key} cached=True",flush=True)
     finally:
         runner._free_text_encoder(force=True)
+    index_hash=hashlib.sha256(Path(args.joint_index).read_bytes()).hexdigest()
     result={
         "source_index":str(Path(args.joint_index).resolve()),
+        "joint_index_sha256":index_hash,
         "conditioner":"REAL_Qwen3VL_32B_H3_hidden_state_50",
         "prompt_embeds_by_text":computed,
+        "prompt_embeds_sha256":{
+            prompt:hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for prompt,path in computed.items()
+        },
     }
     (directory/"prompts.json").write_text(json.dumps(result,indent=2))
     print("H3_QWEN_TEXT_EMBEDDING_CACHE_COMPLETE",
@@ -87,6 +97,9 @@ def main():
     p.add_argument("--output-dir",default="/content/h3_wan_joint_text")
     p.add_argument("--upstream-repo",default="/content/Diffusers_minimax-h3")
     p.add_argument("--preflight-only",action="store_true")
+    p.add_argument("--force-reencode",action="store_true",
+                   help="Rebuild ALL embeddings after invalid or missing "
+                        "SHA256 cache manifest; never rehash corrupted tensors")
     run(p.parse_args())
 
 

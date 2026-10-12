@@ -104,11 +104,13 @@ def install_upstream_hooks(runner_module,adapter,rank,latent_file):
                     raise RuntimeError(
                         "H3 native decoder received wrong normalized latent shape")
                 latent_file.parent.mkdir(parents=True,exist_ok=True)
+                pending=latent_file.with_suffix(".pt.partial")
                 torch.save({
                     "latents":z.detach().cpu().float().contiguous(),
                     "source":"actual_h3_denoiser_with_trained_wan_joint_dit_lora",
                     "dit_lora_sha256":sha256(adapter),
-                },latent_file)
+                },pending)
+                os.replace(pending,latent_file)
                 print("WAN_JOINT_H3_NATIVE_LATENTS_CAPTURED",
                       json.dumps({"file":str(latent_file),
                                   "shape":list(z.shape)}),flush=True)
@@ -140,6 +142,8 @@ def generate(args):
     root=Path(args.output_dir)
     root.mkdir(parents=True,exist_ok=True)
     latent_file=root/"joint_h3_generated_normalized_latents.pt"
+    # Old latents cannot be accepted as evidence of a newly generated sample.
+    latent_file.unlink(missing_ok=True)
     install_upstream_hooks(runner_module,args.dit_lora,args.rank,latent_file)
     runner=runner_module.MiniMaxH3Runner(root/"upstream")
     result=runner.generate(
@@ -156,6 +160,7 @@ def generate(args):
         "status":"H3_NATIVE_JOINT_DIT_LORA_GENERATED_24CH",
         "rgb_audio_mp4":str(mp4),"generated_latents":str(latent_file),
         "dit_lora_hash":sha256(args.dit_lora),
+        "generated_latents_sha256":sha256(latent_file),
         "alpha_stream_generated_separately":False,
         "requires_joint_vae_decode":True,
     }
@@ -176,7 +181,11 @@ def decode(args):
     report=json.loads(report_file.read_text())
     if sha256(args.dit_lora)!=report["dit_lora_hash"]:
         raise RuntimeError("DiT adapter differs from generation checkpoint")
+    if sha256(report["generated_latents"])!=report.get("generated_latents_sha256"):
+        raise RuntimeError("Captured native H3 joint latent file is stale or corrupted")
     src=torch.load(report["generated_latents"],map_location="cpu",weights_only=True)
+    if src.get("dit_lora_sha256")!=sha256(args.dit_lora):
+        raise RuntimeError("Captured latents originated from a different DiT LoRA")
     z=src["latents"]
     if z.ndim!=5 or z.shape[1]!=24 or not torch.isfinite(z).all():
         raise RuntimeError("Invalid generated H3 joint latent capture")

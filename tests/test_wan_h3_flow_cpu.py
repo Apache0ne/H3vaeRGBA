@@ -7,7 +7,7 @@ import torch
 from torch import nn
 
 from h3rgba.wan_h3_flow import (
-    rectified_flow_batch,h3_packed_flow_loss,
+    rectified_flow_batch,shifted_video_clean_time,h3_packed_flow_loss,
     inject_h3_transformer_lora,h3_dit_lora_state
 )
 from tools.cache_h3_wan_joint_targets import captions_for
@@ -99,3 +99,17 @@ def test_genuine_caption_ids_required_without_guesses():
         "A fox with a transparent background","A flower on a transparent background"]
     with pytest.raises(ValueError,match="Missing REAL captions"):
         captions_for(items,{"sample_001":"unknown object"})
+
+
+def test_h3_native_video_schedule_uses_shift12_and_data_ward_time():
+    # Native inference maps u=0.5 to sigma=6/6.5, NOT t=0.5.
+    assert float(shifted_video_clean_time(0.5)) == pytest.approx(1-6/6.5)
+    assert float(shifted_video_clean_time(0.1)) > float(shifted_video_clean_time(0.9))
+    with pytest.raises(ValueError):
+        shifted_video_clean_time(1.0)
+    sample=torch.zeros(1,24,7,4,4)
+    gen=torch.Generator().manual_seed(1234)
+    noisy,target,t=rectified_flow_batch(sample,generator=gen)
+    assert 0 < float(t) < 1
+    # Exact noise conservation for a clean-zero sample: target=-epsilon.
+    assert torch.allclose(noisy, -(1-t)*target,atol=1e-6)

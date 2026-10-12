@@ -1,5 +1,27 @@
 # MiniMax-H3 RGBA research
 
+## Current native H3 Wan-style joint RGB+alpha training path (experimental)
+
+**Entry point:** [One-cell A100 training and validation](docs/RUN_NATIVE_H3_WAN_RGBA_A100.md) or `tools/launch_h3_wan_native_a100.py`.
+This is the **single 24-channel joint-latent** approach: a new trained H3 RGB+alpha
+VAE bridge followed by a **real H3 33B diffusion LoRA** on fused latents, then
+native H3 generation and same-latent RGB+alpha decoding. It does **not** use
+the separate 4,000-step alpha diffusion sidecar.
+
+The launcher runs real Qwen3-VL caption conditioning, hash-verified latent
+caches, optimizer checkpoints with matching resume signatures, a two-step GPU
+smoke before long training, RGBA PNG + ProRes4444/audio output, and an
+independent nine-clip held-out VAE evaluation. The H3 DiT velocity convention
+is data-ward and its video-noise distribution uses H3's shift=12 schedule.
+
+**Verification:** CPU regression testing exists. Full A100 joint VAE training,
+33B backpropagation, native generation and alpha fidelity are **not yet
+verified** by the repository's CPU tests. Do not interpret a MOV export or
+held-out *VAE reconstruction* score as a measured novel-video alpha score.
+
+The older stages below are retained as research history and do not replace
+this current two-stage experiment.
+
 ### Completing a full Colab run without GPU OOM or losing progress
 
 The user-measured 2-step BF16 dual-path training used **6.81 GiB peak reserved VRAM** on a **22.5 GiB** GPU, so continuing at the SAME 128x128/rank-4 configuration does **not** require 8-bit weights, model offload, or decreasing quality. 128px yields strong step-zero alpha IoU **0.86064** / MAE **0.04246**; step two IoU **0.86072**, so use best-validation LoRA rather than assuming more steps improve it.

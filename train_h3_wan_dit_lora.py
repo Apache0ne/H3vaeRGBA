@@ -32,6 +32,16 @@ def filehash(path):
     return h.hexdigest()
 
 
+def run_signature(args):
+    """Single source of truth for checkpoint save/resume compatibility."""
+    return {
+        "rank": args.rank, "lr": args.lr, "seed": args.seed,
+        "weight_mode": args.weight_mode,
+        "joint_index_hash": filehash(args.joint_index),
+        "prompts_hash": filehash(args.prompts_json),
+    }
+
+
 def read_inputs(joint_index,prompts_json):
     index=json.loads(Path(joint_index).read_text())["samples"]
     text=json.loads(Path(prompts_json).read_text())
@@ -133,12 +143,7 @@ def save(model,optimizer,args,step,best,*,new_best=False):
     torch.save({
         "step":step,"best":best,
         "optimizer":optimizer.state_dict(),
-        "settings":{
-            "rank":args.rank,"lr":args.lr,"seed":args.seed,
-            "weight_mode":args.weight_mode,
-            "joint_index_hash":filehash(args.joint_index),
-            "prompts_hash":filehash(args.prompts_json),
-        }
+        "settings":run_signature(args)
     },tmp)
     os.replace(tmp,root/"state_latest.pt")
     if new_best:
@@ -221,11 +226,7 @@ def main():
     best=None
     if args.resume:
         ckpt=torch.load(resume_file,map_location="cpu",weights_only=True)
-        want={
-            "rank":args.rank,"lr":args.lr,"seed":args.seed,
-            "joint_index_hash":filehash(args.joint_index),
-            "prompts_hash":filehash(args.prompts_json),
-        }
+        want=run_signature(args)
         if ckpt["settings"]!=want:
             raise RuntimeError("Resume model data or adapter settings mismatch")
         load_lora_file(model,out/"checkpoints/dit_lora_latest.safetensors")

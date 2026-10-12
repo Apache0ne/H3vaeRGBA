@@ -107,7 +107,8 @@ def main():
                 dest=group_dir/f"{k:05d}.pt"
                 torch.save({"latent":norm.cpu().half().contiguous()},dest)
                 index.append({"id":row["id"],"caption":captions[row["id"]],
-                              "group":group,"latent":str(dest)})
+                              "group":group,"latent":str(dest),
+                              "latent_sha256":filehash(dest)})
                 if (k+1)%25==0:
                     print("WAN_JOINT_TARGET_CACHE",group,k+1,len(items),flush=True)
     record={
@@ -117,6 +118,11 @@ def main():
         "source_adapter_hash":filehash(args.base_vae_lora),
         "manifest_hash":filehash(args.manifest),
         "captions_hash":filehash(args.captions_json),
+        "resolution":args.resolution,
+        "seed":args.seed,
+        "hidden":args.hidden,
+        "shift_limit":args.shift_limit,
+        "bridge_scale":args.bridge_scale,
         "samples":index,
     }
     (output/"index.json").write_text(json.dumps(record,indent=2))
