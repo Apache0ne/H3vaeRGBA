@@ -140,6 +140,8 @@ def generate(args):
     root=Path(args.output_dir)
     root.mkdir(parents=True,exist_ok=True)
     latent_file=root/"joint_h3_generated_normalized_latents.pt"
+    # Old latents cannot be accepted as evidence of a newly generated sample.
+    latent_file.unlink(missing_ok=True)
     install_upstream_hooks(runner_module,args.dit_lora,args.rank,latent_file)
     runner=runner_module.MiniMaxH3Runner(root/"upstream")
     result=runner.generate(
