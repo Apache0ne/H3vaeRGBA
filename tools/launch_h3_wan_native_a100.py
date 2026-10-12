@@ -143,6 +143,7 @@ def run(args):
     cache_inputs = dict(
         bridge=bridge, dual=adapted, base_lora=old,
         manifest=manifest, captions=phases["captions"],
+        resolution=args.dit_cache_resolution, seed=args.seed,
     )
     if index.is_file():
         try:
