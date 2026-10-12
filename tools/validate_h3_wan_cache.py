@@ -22,7 +22,8 @@ def _read(path):
     return json.loads(Path(path).read_text())
 
 
-def validate_joint_cache(index_path, *, bridge, dual, base_lora, manifest, captions):
+def validate_joint_cache(index_path, *, bridge, dual, base_lora, manifest, captions,
+                         resolution=None, seed=None):
     index = _read(index_path)
     expected = {
         "stage1_bridge_hash": bridge,
@@ -38,6 +39,16 @@ def validate_joint_cache(index_path, *, bridge, dual, base_lora, manifest, capti
                 f"STALE_JOINT_CACHE: {field} differs from {path}; "
                 "recache joint latents with the current trained VAE."
             )
+    if resolution is not None and index.get("resolution") != resolution:
+        raise RuntimeError(
+            f"STALE_JOINT_CACHE: resolution is {index.get('resolution')}; "
+            f"requested {resolution}. Re-encode joint H3 latents."
+        )
+    if seed is not None and index.get("seed") != seed:
+        raise RuntimeError(
+            f"STALE_JOINT_CACHE: split seed is {index.get('seed')}; "
+            f"requested {seed}. Recreate deterministic data split."
+        )
     samples = index.get("samples")
     if not isinstance(samples, list) or not samples:
         raise RuntimeError("Joint latent cache has no samples")
@@ -86,10 +97,13 @@ def main():
     p.add_argument("--manifest", required=True)
     p.add_argument("--captions", required=True)
     p.add_argument("--prompts-json")
+    p.add_argument("--resolution", type=int)
+    p.add_argument("--seed", type=int)
     args = p.parse_args()
     counts = validate_joint_cache(
         args.joint_index, bridge=args.bridge, dual=args.dual,
         base_lora=args.base_lora, manifest=args.manifest, captions=args.captions,
+        resolution=args.resolution, seed=args.seed,
     )
     result = {"status": "VALID_H3_WAN_JOINT_CACHE", **counts}
     if args.prompts_json:
