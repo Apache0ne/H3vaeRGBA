@@ -112,6 +112,45 @@ def measure(pred_alpha, target_rgba, pred_rgb=None):
     return result
 
 
+
+def threshold_diagnostics(pred, target, *, thresholds=(.2, .3, .4, .5, .6, .7, .8)):
+    """Oracle threshold sweep for FAILURE ANALYSIS, not a claimed benchmark score.
+
+    GT alpha is always binarized at 0.5; prediction threshold is swept.
+    Selecting the best threshold *on the evaluated clip itself* is optimistic,
+    so report this separately from the official fixed-threshold IoU.
+    """
+    if target.ndim == 5 and target.shape[1] == 4:
+        target = target[:, 3:4]
+    pred = pred.float().clamp(0,1)
+    target = target.float().clamp(0,1)
+    _assert_shapes(pred, target)
+    gt = target > .5
+    support = int(gt.sum().item())
+    by_threshold = {}
+    for level in thresholds:
+        if not 0 < level < 1:
+            raise ValueError("Thresholds must lie strictly between zero and one")
+        mask = pred > level
+        intersection = int((mask & gt).sum().item())
+        union = int((mask | gt).sum().item())
+        by_threshold[f"{float(level):.2f}"] = (
+            intersection / union if union else 1.0
+        )
+    best = max(by_threshold, key=by_threshold.get)
+    score_half = binary_iou(pred,target,.5)
+    return {
+        "threshold_iou": by_threshold,
+        "iou_threshold_0_5": score_half,
+        "oracle_threshold": float(best),
+        "oracle_iou": by_threshold[best],
+        "oracle_gain_over_half": by_threshold[best] - score_half,
+        "hard_gt_foreground_pixels": support,
+        "degenerate_empty_hard_gt": support == 0,
+        "note": "Oracle threshold is fitted on this same test clip; diagnostic only",
+    }
+
+
 def summarize(results):
     """Macro average over clips; also give pixel-weighted IoU and worst cases."""
     if not results:
@@ -129,6 +168,13 @@ def summarize(results):
     union = sum(row.get("pixels_union", 0) for row in results)
     means["alpha_micro_iou"] = intersection / union if union else 1.0
     means["samples"] = len(results)
+    meaningful = [r for r in results if r.get("pixels_foreground", 0) > 0]
+    means["alpha_iou_nonempty_gt"] = (
+        sum(r["alpha_iou"] for r in meaningful) / len(meaningful)
+        if meaningful else None
+    )
+    means["nonempty_gt_samples"] = len(meaningful)
+    means["empty_gt_samples"] = len(results) - len(meaningful)
     means["worst_three_iou"] = [
         {"id": row.get("id", ""), "alpha_iou": row["alpha_iou"]}
         for row in sorted(results, key=lambda v: v["alpha_iou"])[:3]
