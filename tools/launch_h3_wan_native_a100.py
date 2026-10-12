@@ -238,10 +238,50 @@ def run(args):
     dest.mkdir(parents=True,exist_ok=True)
     shutil.copy2(video,dest/"wan_joint_rgba.mov")
     shutil.copy2(report,dest/"wan_joint_rgba_report.json")
-    print("WAN_NATIVE_TWO_STAGE_COMPLETE_UNVALIDATED_QUALITY",
-          json.dumps({"video":str(video),
-                      "drive":str(dest/"wan_joint_rgba.mov"),
-                      "note":"Inspect real frames and alpha validity before claims of success"}),flush=True)
+
+    print("[WAN STAGE 7] Final reserved GT holdout evaluation (no training)",flush=True)
+    final_holdout=out/"final_heldout"
+    launch([sys.executable,"-u",REPO/"tools/validate_h3_wan_holdout.py",
+            "--manifest",manifest,
+            "--base-vae-lora",old,
+            "--joint-dual",adapted,"--joint-bridge",bridge,
+            "--seed",str(args.seed),"--resolution","128",
+            "--output-dir",final_holdout])
+    holdout_report=final_holdout/"joint_vae_holdout_report.json"
+    holdout=json.loads(holdout_report.read_text())
+    actual_video=json.loads(report.read_text())
+    heldout_scores=holdout["metrics"]
+    # A held-out VAE reconstruction measures the codec, NOT novel DiT outputs.
+    gate_checks={
+        "heldout_joint_vae_alpha_iou_at_least_0_60":
+            heldout_scores["alpha_iou"]>=0.60,
+        "heldout_joint_vae_rgb_l1_at_most_0_12":
+            heldout_scores["rgb_visible_l1"]<=0.12,
+        "generated_alpha_not_all_opaque_or_empty":
+            0.005<actual_video["alpha_hard_coverage"]<0.995,
+    }
+    final={
+        "status": ("EXPORTED_WITH_BASIC_QUALITY_GATES"
+                   if all(gate_checks.values()) else "EXPORTED_QUALITY_GATES_FAILED"),
+        "generated_video_alpha_ground_truth_verified":False,
+        "one_joint_h3_latent":True,
+        "no_independent_alpha_sidecar":True,
+        "stage1_reserved_holdout":holdout["metrics"],
+        "stage1_holdout_report":str(holdout_report),
+        "native_rgba_mov":str(video),
+        "checks":gate_checks,
+        "important":"Final generated alpha still requires visual inspection and "
+                    "independent ground-truth test before production claims",
+    }
+    final_path=out/"end_to_end_status.json"
+    final_path.write_text(json.dumps(final,indent=2))
+    shutil.copy2(final_path,dest/"end_to_end_status.json")
+    shutil.copy2(holdout_report,dest/"joint_vae_holdout_report.json")
+    print("WAN_NATIVE_TWO_STAGE_COMPLETE_UNVALIDATED_GENERATION_QUALITY",
+          json.dumps(final,indent=2),flush=True)
+    if not all(gate_checks.values()):
+        raise RuntimeError("Native H3 RGBA file exported but quality gates failed. "
+                           "Inspect end_to_end_status.json and holdout previews.")
 
 
 def main():
