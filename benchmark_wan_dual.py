@@ -35,6 +35,10 @@ def config():
                    help="Directory with trained dual alpha adapter checkpoints")
     p.add_argument("--checkpoint", default=None, help="Override best LoRA adapter path")
     p.add_argument("--manifest", default="/content/h3rgba_data/manifest.json")
+    p.add_argument("--external-manifest", default=None,
+                   help="Optional independent foreground+alpha pairs, never used in training")
+    p.add_argument("--max-external", type=int, default=0,
+                   help="0 = test all clips in external manifest")
     p.add_argument("--output-dir", default="/content/h3rgba_runs/h3_wan_major_benchmark")
     p.add_argument("--resolution", type=int, default=128)
     p.add_argument("--rank", type=int, default=4)
@@ -230,7 +234,7 @@ def benchmark(codec, items, output, args, device):
     report_lines = []
     for group, entries in items.items():
         rows = []
-        if group in ("previously_validated", "unused_holdout"):
+        if group in ("previously_validated", "unused_holdout", "external_dataset"):
             dataset = PairedVideoDataset(entries, resolution=args.resolution, deterministic=True)
             data = ((str(entry.get("id", idx)), dataset[idx]) for idx, entry in enumerate(entries))
         else:
@@ -271,7 +275,7 @@ def main():
     args = config()
     if args.resolution < 32 or args.resolution % 32 or args.trained_val_samples < 0:
         raise ValueError("Invalid resolution or trained validation split size")
-    if args.max_heldout < 0 or args.bootstrap < 0:
+    if args.max_heldout < 0 or args.max_external < 0 or args.bootstrap < 0:
         raise ValueError("Invalid benchmark size/bootstrap")
     cases = tuple(filter(None, (v.strip() for v in args.stress_cases.split(","))))
     if not cases or set(cases) - set(STRESS_CASES):
@@ -310,6 +314,29 @@ def main():
                    "independent dataset generalization evidence.",
         }
         print("SPLIT_AUDIT",json.dumps(manifest_proof),flush=True)
+    if args.external_manifest:
+        external_path = Path(args.external_manifest).resolve()
+        external = json.loads(external_path.read_text())["clips"]
+        if args.stress_only:
+            raise ValueError("--external-manifest cannot be combined with --stress-only")
+        training_locations = {str(Path(e["foreground"]).resolve()) for e in records} | {
+            str(Path(e["alpha"]).resolve()) for e in records
+        }
+        collision = [e["id"] for e in external if
+                     str(Path(e["foreground"]).resolve()) in training_locations or
+                     str(Path(e["alpha"]).resolve()) in training_locations]
+        if collision:
+            raise RuntimeError("External test videos overlap training/validation file paths: "
+                               + str(collision[:6]))
+        if len({(e["foreground"], e["alpha"]) for e in external}) != len(external):
+            raise RuntimeError("Duplicate files in external manifest")
+        items["external_dataset"] = external[:args.max_external] if args.max_external else external
+        manifest_proof["external"] = {"path":str(external_path),
+                                      "sha256":sha256_file(external_path),
+                                      "records":len(external),
+                                      "tested":len(items["external_dataset"]),
+                                      "file_path_disjoint":True,
+                                      "near_duplicate_content_audited":False}
     items["synthetic_stress"] = cases[:2] if args.cpu_smoke else cases
     device = torch.device("cpu" if args.cpu_smoke else "cuda")
     if not args.cpu_smoke:
