@@ -108,13 +108,15 @@ def prepare_cache(args, device):
         "decoder_lora_sha256":adapter_digest,
         "resolution":args.resolution,"seed":args.seed,
         "clips_per_video":args.clips_per_video,
-        "train_items":len(train),"validation_items":min(3,len(valid))
+        "train_items":len(train),"validation_items":min(3,len(valid)),
+        "gt_validation_masks":True
     }
     if proof.exists():
         record=json.loads(proof.read_text())
         if {key:record.get(key) for key in expected} == expected and (
             len(list((root/"train").glob("*.pt"))) == expected["train_items"]*args.clips_per_video and
-            len(list((root/"val").glob("*.pt"))) == expected["validation_items"]
+            len(list((root/"val").glob("*.pt"))) == expected["validation_items"] and
+            len(list((root/"val_gt").glob("*.pt"))) == expected["validation_items"]
         ):
             print("PAIRED_LATENT_CACHE_REUSED",json.dumps(expected),flush=True)
             return
@@ -150,6 +152,12 @@ def prepare_cache(args, device):
                 if stacked.shape[0]!=48 or not torch.isfinite(stacked).all():
                     raise RuntimeError("Cached alpha/RGB latent pair invalid")
                 torch.save(stacked,folder/f"{j:06d}_{k:02d}.pt")
+                if group=="val":
+                    gt_dir=root/"val_gt"
+                    gt_dir.mkdir(parents=True,exist_ok=True)
+                    # True dataset matte, NOT decoded teacher alpha.
+                    torch.save(rgba[0,3:4].half().cpu().contiguous(),
+                               gt_dir/f"{j:06d}_{k:02d}.pt")
                 count+=1
                 if count%50==0:
                     print("CACHE_PROGRESS",group,count,flush=True)
@@ -186,10 +194,17 @@ def save_snapshot(net,opt,args,step,best_iou,*,tag):
 
 @torch.no_grad()
 def validate(net, codec, valid, schedule, args,device,step):
-    """Select best on the original THREE validation clips, not the unused 9."""
+    """Select best against REAL matte GT on THREE seen validation clips.
+
+    Oracle decoded matte is a secondary VAE-reference diagnostic only.
+    """
     from h3rgba.dual_loss import alpha_scores
     net.eval()
     ious=[]
+    oracle_ious=[]
+    masks=sorted((Path(args.cache_dir)/"val_gt").glob("*.pt"))
+    if len(masks)!=len(valid):
+        raise RuntimeError("Ground-truth validation alpha cache missing")
     for ix in range(len(valid)):
         raw=valid[ix].unsqueeze(0).to(device)
         zr=raw[:,:24].float()
@@ -208,12 +223,18 @@ def validate(net, codec, valid, schedule, args,device,step):
         ).clamp(0,1)
         if estimated.shape!=reference.shape:
             raise RuntimeError("Alpha diffusion and teacher decoded mask shape mismatch")
-        scores=alpha_scores(estimated,reference)
+        gt=torch.load(masks[ix],map_location="cpu",weights_only=True)
+        gt=gt[None].to(device,dtype=torch.float32)
+        if gt.shape!=estimated.shape:
+            raise RuntimeError("Real validation matte GT has wrong shape")
+        scores=alpha_scores(estimated,gt)
         ious.append(float(scores["alpha_iou"]))
+        oracle_ious.append(float(alpha_scores(estimated,reference)["alpha_iou"]))
     score=sum(ious)/len(ious)
     print("ALPHA_SIDECAR_VALIDATION",json.dumps(
-        {"step":step,"alpha_iou_vs_frozen_vae_oracle":score,
-         "samples":len(ious),"individual_iou":ious}),flush=True)
+        {"step":step,"alpha_iou_vs_REAL_matte_ground_truth":score,
+         "alpha_iou_vs_vae_oracle":sum(oracle_ious)/len(oracle_ious),
+         "samples":len(ious),"individual_real_gt_iou":ious}),flush=True)
     net.train()
     return score
 
@@ -297,14 +318,14 @@ def main():
         if step%args.val_every==0 or step==args.steps:
             score=validate(net,codec,val_ds,schedule,args,device,step)
             with (root/"validation.jsonl").open("a") as f:
-                f.write(json.dumps({"step":step,"alpha_iou_vs_vae_oracle":score})+"\n")
+                f.write(json.dumps({"step":step,"alpha_iou_vs_real_ground_truth":score})+"\n")
             if score>best:
                 best=score
                 save_snapshot(net,opt,args,step,best,tag="best")
         if step%args.save_every==0 or step==args.steps:
             save_snapshot(net,opt,args,step,best,tag="latest")
     print("ALPHA_DIFFUSION_TRAINING_COMPLETE",json.dumps(
-        {"trained_steps":step,"best_iou_vs_oracle":best,
+        {"trained_steps":step,"best_iou_vs_real_ground_truth":best,
          "best_checkpoint":str(root/"checkpoints/sidecar_best.pt"),
          "alpha_generated_from_noise":True}),flush=True)
 
