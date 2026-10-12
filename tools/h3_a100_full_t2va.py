@@ -228,16 +228,38 @@ def validate_qwen_processor(*, offline=False):
                 f"H3 A100 runner expects torchvision 0.24.x, got "
                 f"{torchvision.__version__}"
             )
-        if not offline:
-            from huggingface_hub import snapshot_download
-            print("H3_PROCESSOR_METADATA_ONLY_DOWNLOAD",flush=True)
-            snapshot_download(
-                repo_id=MODEL_ID,
-                allow_patterns=["processor/*"],
-                max_workers=2,
-            )
+        from huggingface_hub import snapshot_download
+        if os.environ.get("HF_HUB_OFFLINE") in ("1", "ON", "YES", "TRUE") and not offline:
+            raise RuntimeError("HF_HUB_OFFLINE is enabled. Permit a small "
+                               "processor/tokenizer metadata download.")
+        # The T2VA checkpoint cache check guarantees large weight shards,
+        # NOT the small processor and tokenizer metadata files.
+        print("H3_PROCESSOR_AND_TOKENIZER_METADATA_CHECK",flush=True)
+        snapshot=snapshot_download(
+            repo_id=MODEL_ID,
+            allow_patterns=["processor/*", "tokenizer/*"],
+            max_workers=2,
+            local_files_only=offline,
+        )
+        processor_dir=Path(snapshot)/"processor"
+        tokenizer_dir=Path(snapshot)/"tokenizer"
+        expected={
+            "processor": ["preprocessor_config.json", "tokenizer_config.json",
+                          "tokenizer.json", "video_preprocessor_config.json"],
+            "tokenizer": ["tokenizer_config.json", "tokenizer.json"],
+        }
+        missing=[
+            f"{folder}/{name}"
+            for folder,names in expected.items() for name in names
+            if not ((processor_dir if folder=="processor" else tokenizer_dir)/name).is_file()
+        ]
+        if missing:
+            raise FileNotFoundError("Missing MiniMax H3 small processor/tokenizer "
+                                    "assets: " + ", ".join(missing))
+        # Load explicitly from the local snapshot directory: avoids Hub
+        # auto-tokenizer config.json lookups against a different revision.
         processor=Qwen3VLProcessor.from_pretrained(
-            MODEL_ID,subfolder="processor",local_files_only=True,
+            str(processor_dir),local_files_only=True,
         )
         if not callable(getattr(processor,"create_mm_token_type_ids",None)):
             raise RuntimeError("Qwen3-VL processor missing create_mm_token_type_ids")
@@ -245,7 +267,9 @@ def validate_qwen_processor(*, offline=False):
               json.dumps({"torch":torch.__version__,
                           "torchvision":torchvision.__version__,
                           "processor":type(processor).__name__,
-                          "processor_assets_only":True}),flush=True)
+                          "processor_assets_only":True,
+                          "processor_dir":str(processor_dir),
+                          "tokenizer_dir":str(tokenizer_dir)}),flush=True)
         return processor
     except Exception as exc:
         print("H3_QWEN_PROCESSOR_FULL_TRACEBACK",flush=True)
