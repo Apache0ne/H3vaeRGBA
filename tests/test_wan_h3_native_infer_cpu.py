@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 import torch
 
-from tests.test_wan_dual_cpu import tiny_codec
+from benchmark_wan_dual import tiny_model
 from h3rgba.wan_joint_h3 import WanJointH3Codec
 from tools.import_wan_alpha_captions import match_captions
 import tools.generate_h3_wan_joint as gen
@@ -12,7 +12,7 @@ import tools.generate_h3_wan_joint as gen
 
 def test_full_h3_native_vae_decode_both_rgb_and_alpha_from_one_tensor():
     torch.manual_seed(23)
-    codec=WanJointH3Codec(tiny_codec(),hidden=16,
+    codec=WanJointH3Codec(tiny_model(),hidden=16,
                           train_decoder_lora=False)
     codec.eval()
     rgba=torch.rand(1,4,17,32,32)
