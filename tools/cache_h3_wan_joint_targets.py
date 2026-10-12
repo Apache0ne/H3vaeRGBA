@@ -117,6 +117,11 @@ def main():
         "source_adapter_hash":filehash(args.base_vae_lora),
         "manifest_hash":filehash(args.manifest),
         "captions_hash":filehash(args.captions_json),
+        "resolution":args.resolution,
+        "seed":args.seed,
+        "hidden":args.hidden,
+        "shift_limit":args.shift_limit,
+        "bridge_scale":args.bridge_scale,
         "samples":index,
     }
     (output/"index.json").write_text(json.dumps(record,indent=2))
