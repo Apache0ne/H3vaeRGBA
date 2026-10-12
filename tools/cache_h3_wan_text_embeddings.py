@@ -77,6 +77,10 @@ def run(args):
         "joint_index_sha256":index_hash,
         "conditioner":"REAL_Qwen3VL_32B_H3_hidden_state_50",
         "prompt_embeds_by_text":computed,
+        "prompt_embeds_sha256":{
+            prompt:hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            for prompt,path in computed.items()
+        },
     }
     (directory/"prompts.json").write_text(json.dumps(result,indent=2))
     print("H3_QWEN_TEXT_EMBEDDING_CACHE_COMPLETE",
