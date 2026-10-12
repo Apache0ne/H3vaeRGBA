@@ -129,3 +129,60 @@ major_benchmark_128/
 **Comparison target:** trained alpha IoU 0.955329/MAE 0.017947 previously
 validated. We should only claim generalization if unused/external clips and
 stress tests perform well too, especially with partial alpha and thin geometry.
+
+
+## Measured 500-step H3 VAE LoRA generalization results (2026-10-11)
+
+Full official RGB H3 VAE checkpoint **2,610,357,048 parameters** verified
+against its three official shards (10.416 GB), with **216 decoder LoRA
+layers** and **6,489,244 trainable adapter parameters**. Input RGBA video
+provides the reference transparency channel: scores measure VAE alpha
+**reconstruction**, NOT RGB-only extraction or alpha generation.
+
+| Group | Original VAE macro alpha IoU | Trained LoRA macro alpha IoU | Trained MAE |
+|---|---:|---:|---:|
+| 3 previously validated | 0.8606 | 0.9553 | 0.0179 |
+| 9 unseen-in-validation | 0.6731 | 0.7952 | 0.0123 |
+| 10 synthetic stress cases | 0.7006 | 0.8590 | 0.0169 |
+
+All 9 unused-heldout samples improved in fixed-0.5 IoU versus original
+pretrained H3 grayscale-alpha reconstruction. These are still from the *same*
+dataset domain, not an independent external test.
+
+**Known weak clips:** `smokes_smoke_05_6` 0.1373 IoU / 0.0060 MAE,
+`hair_strands` 0.3863 IoU / 0.0247 MAE, thin ring 0.7007 IoU,
+two sparse unused clips 0.6122 and 0.6203 IoU. IoU can understate
+quality on near-empty >0.5 masks and overstate quality on completely
+empty/full masks. The benchmark's prior synthetic macro includes the
+`all_transparent`, `all_opaque`, and `partial_flat` trivial hard-mask
+tests (all IoU 1.0), so do not report 0.859 as the fine-structure score.
+
+### Post-process V2 metrics WITHOUT using the GPU
+
+The full V2 benchmark writes threshold curves to `samples.jsonl`, but
+`SAMPLE` log lines intentionally report the fixed 0.5 score only. Analyze
+those existing curves offline:
+
+```bash
+git -C /content/H3vaeRGBA pull --ff-only
+python /content/H3vaeRGBA/analyze_benchmark_thresholds.py \
+  --results-dir /content/h3rgba_runs/h3_major_benchmark_v2
+```
+
+This writes `threshold_analysis.md`, `threshold_analysis.json`, and
+`threshold_cases.csv`. It also chooses a SINGLE mask threshold using
+the three previously validated clips and **tests that fixed threshold**
+against all nine other held-out clips, to distinguish systematic
+calibration errors from lost spatial detail.
+
+**Never quote per-test-clip oracle thresholds as held-out model
+performance.** Those thresholds are chosen using the tested clip's GT and
+only provide an optimistic upper bound for the available sweep. The
+3-clip calibration set was already used in model selection and is too small
+to support strong generalization claims.
+
+**Stop before blindly training more steps.** First assess the true
+foreground support fraction in smoke and the oracle-vs-fixed threshold
+gap. If no reasonable common threshold recovers missing thin strands,
+the remaining issue is spatial information at 128px, for which a
+separate *192/256px* evaluation is more targeted than threshold tuning.
