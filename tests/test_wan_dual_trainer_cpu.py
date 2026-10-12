@@ -9,7 +9,7 @@ import torch
 from safetensors.torch import load_file
 
 from tools.dataset_audit import build_manifest
-from train_wan_dual_lora import maybe_save_best
+from train_wan_dual_lora import maybe_save_best, backup_snapshot
 
 
 def write_video(path, *, matte=False):
@@ -62,3 +62,34 @@ def test_best_safetensors_follows_validation_alpha_iou(tmp_path):
     assert best==v2
     saved=load_file(str(tmp_path/"checkpoints"/"dual_lora_best.safetensors"))
     assert torch.equal(saved["dummy.weight"],torch.tensor([2.0]))
+
+
+def test_persistent_backup_snapshots_are_complete_and_pruned(tmp_path):
+    out = tmp_path / "local"
+    bak = tmp_path / "persistent"
+    (out/"checkpoints").mkdir(parents=True)
+    (out/"checkpoints"/"optimizer_last.pt").write_bytes(b"optimizer")
+    (out/"checkpoints"/"dual_lora_last.safetensors").write_bytes(b"adapter")
+    (out/"settings.json").write_text("{}")
+    (out/"metrics.jsonl").write_text('{"step":1}\n')
+
+    for step in (1, 2, 3, 4):
+        snapshot = backup_snapshot(out, bak, step)
+        assert (snapshot/"COMPLETE.json").is_file()
+        assert json.loads((snapshot/"COMPLETE.json").read_text())["step"] == step
+        assert (snapshot/"checkpoints"/"optimizer_last.pt").read_bytes() == b"optimizer"
+        assert (snapshot/"checkpoints"/"dual_lora_last.safetensors").read_bytes() == b"adapter"
+    assert sorted(x.name for x in bak.iterdir()) == [
+        "step_000002", "step_000003", "step_000004"
+    ]
+
+    # An incomplete snapshot must never pass as a restorable checkpoint.
+    (out/"checkpoints"/"optimizer_last.pt").unlink()
+    import pytest
+    with pytest.raises(FileNotFoundError):
+        backup_snapshot(out,bak,5)
+    assert not (bak/"step_000005"/"COMPLETE.json").exists()
+    assert not (bak/"step_000005").exists()
+
+    with pytest.raises(ValueError):
+        backup_snapshot(out,out/"unsafe_nested",6)
