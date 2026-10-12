@@ -13,6 +13,11 @@ import os
 import sys
 from pathlib import Path
 
+# Allow execution by absolute filename from /content Colab, not just repo cwd.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
 
 def run(args):
     index=json.loads(Path(args.joint_index).read_text())["samples"]
