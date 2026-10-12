@@ -110,6 +110,7 @@ def test_old_generation_report_never_suppresses_new_trained_lora(tmp_path):
         "dit_lora_hash": sha256(old),
         "rgb_audio_mp4": str(movie),
         "generated_latents": str(latents),
+        "generated_latents_sha256": sha256(latents),
     }))
     assert generation_is_current(report,old)
     old.write_bytes(b"new weight checkpoint")
@@ -173,3 +174,22 @@ def test_corrupt_real_qwen_embeddings_fail_before_training(tmp_path):
     e.write_bytes(b"BAD QWEN TENSOR")
     with pytest.raises(RuntimeError,match="STALE_TEXT_CACHE"):
         validate_text_cache(paths["index"],text)
+
+
+def test_tampered_captured_h3_native_latents_fail_generation_guard(tmp_path):
+    adapter=tmp_path/"dit_lora.safetensors"
+    adapter.write_bytes(b"trained real adapter")
+    latents=tmp_path/"latents.pt"
+    latents.write_bytes(b"original generated H3 latents")
+    movie=tmp_path/"rgb_audio.mp4"
+    movie.write_bytes(b"video")
+    report=tmp_path/"wan_h3_generation.json"
+    report.write_text(json.dumps({
+        "dit_lora_hash":sha256(adapter),
+        "generated_latents_sha256":sha256(latents),
+        "generated_latents":str(latents),
+        "rgb_audio_mp4":str(movie),
+    }))
+    assert generation_is_current(report,adapter)
+    latents.write_bytes(b"truncated result")
+    assert not generation_is_current(report,adapter)
