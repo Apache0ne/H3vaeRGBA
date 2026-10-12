@@ -97,7 +97,7 @@ def test_qwen_processor_fails_early_on_missing_torchvision(monkeypatch):
     # No giant model download, processor data, or CUDA needed.
     # Simulate missing torchvision even when PyTorch itself is installed.
     monkeypatch.setitem(sys.modules, "torchvision", None)
-    with pytest.raises(RuntimeError, match="preflight failed BEFORE loading"):
+    with pytest.raises(RuntimeError, match="preflight failed, BEFORE loading"):
         validate_qwen_processor()
 
 
