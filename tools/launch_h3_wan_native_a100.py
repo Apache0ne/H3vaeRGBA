@@ -150,6 +150,7 @@ def run(args):
             "--output-dir",phases["dit"],
             "--backup-dir",backup/"joint_dit",
             "--rank",str(args.dit_rank),
+            "--weight-mode",args.dit_weight_mode,
             "--lr","2e-5","--seed",str(args.seed),
             "--val-every","50","--save-every","50"]
     dit_latest=phases["dit"]/"checkpoints/state_latest.pt"
@@ -209,6 +210,9 @@ def main():
     p.add_argument("--vae-steps",type=int,default=1000)
     p.add_argument("--dit-steps",type=int,default=1000)
     p.add_argument("--dit-rank",type=int,default=8)
+    p.add_argument("--dit-weight-mode",choices=("bf16","int8"),default="bf16",
+                   help="BF16 training fits 80GB-class GPUs in principle; int8 "
+                        "training may lack autograd support")
     p.add_argument("--min-stage1-iou",type=float,default=.70,
                    help="Require shared 24ch VAE IoU before spending 33B training compute")
     p.add_argument("--max-stage1-rgb-l1",type=float,default=.12,
