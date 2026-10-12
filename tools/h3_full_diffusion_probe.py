@@ -94,6 +94,19 @@ def inspect_result(result, *, requested_frames, requested_width, requested_heigh
             raise RuntimeError("Expected H3 modular pipeline output mapping") from exc
     if "videos" not in result or "audio" not in result or "sampling_rate" not in result:
         raise RuntimeError("Missing official H3 videos/audio/sampling_rate outputs")
+    if "latents" not in result:
+        raise RuntimeError("Missing original H3 denoised video latents: "
+                           "cannot verify diffusion/VAE latent interface")
+    latents = result["latents"]
+    latent_shape = tuple(latents.shape)
+    expected_latent_frames = (requested_frames - 5) // 17 * 5 + 2
+    expected_latent_shape = (
+        1, 24, expected_latent_frames,
+        requested_height // 16, requested_width // 16
+    )
+    if latent_shape != expected_latent_shape:
+        raise RuntimeError(f"H3 output latents shape {latent_shape}, "
+                           f"expected {expected_latent_shape}")
     videos = result["videos"]
     if not videos or not videos[0]:
         raise RuntimeError("H3 video result is empty")
@@ -122,6 +135,8 @@ def inspect_result(result, *, requested_frames, requested_width, requested_heigh
         raise RuntimeError("Generated audio is empty")
     return {
         "generated_video_frames":len(frames), "width":w, "height":h,
+        "denoised_video_latents_shape":list(latent_shape),
+        "denoised_video_latent_channels":latent_shape[1],
         "audio_sample_rate":int(sr),
         "returned_alpha_field":any(
             k in result for k in ("alpha", "alphas", "alpha_latents", "masks")
@@ -211,7 +226,7 @@ def generate(args, report):
             num_frames=args.num_frames,
             num_inference_steps=args.num_inference_steps,
             generator=torch.Generator(device="cpu").manual_seed(args.seed),
-            output=["videos","audio","sampling_rate"],
+            output=["videos","audio","sampling_rate","latents"],
         )
     torch.cuda.synchronize()
     report["diffusion_runtime_seconds"]=round(time.monotonic()-began,2)
