@@ -37,3 +37,48 @@ def test_alpha_sidecar_best_restored_only_when_file_exists(tmp_path):
     backup.parent.mkdir(parents=True)
     backup.write_bytes(b"weights")
     assert best_sidecar(tmp_path,local)==backup
+
+
+def test_heartbeat_prints_status_even_when_child_silent(tmp_path, monkeypatch, capsys):
+    import sys
+    import json
+    import tools.launch_h3_rgba_a100 as mod
+
+    monkeypatch.setenv("H3_E2E_LOG_PATH",str(tmp_path/"launcher.log"))
+    monkeypatch.setattr(mod,"_status_snapshot",
+        lambda **kw: {"phase":kw["phase"],"pid":kw["pid"],
+                      "free_gb_content":60., "child_process":"sleeping"})
+    mod.launch([sys.executable,"-u","-c",
+                "import time; time.sleep(.45); print('done')"],
+               heartbeat_seconds=.1)
+    out=capsys.readouterr().out
+    assert "[H3 STAGE START]" in out
+    assert "[H3 HEARTBEAT]" in out
+    assert "done" in out
+    status=json.loads((tmp_path/"launcher_status.json").read_text())
+    assert status["phase"]=="completed"
+    assert status["exit_code"]==0
+    assert "H3 HEARTBEAT" in (tmp_path/"launcher.log").read_text()
+
+
+def test_child_errors_keep_full_nested_output_in_log(tmp_path,monkeypatch):
+    import sys
+    import pytest
+    import tools.launch_h3_rgba_a100 as mod
+
+    monkeypatch.setenv("H3_E2E_LOG_PATH",str(tmp_path/"launcher.log"))
+    monkeypatch.setattr(mod,"_status_snapshot",
+        lambda **kw: {"phase":kw["phase"],"pid":kw["pid"]})
+    with pytest.raises(RuntimeError,match="CHILD_PROCESS_ERROR_TAIL"):
+        mod.launch([sys.executable,"-u","-c",
+                    "import sys;print('hidden-trace');sys.exit(4)"],
+                   heartbeat_seconds=.1)
+    assert "hidden-trace" in (tmp_path/"launcher.log").read_text()
+    assert "EXIT" in (tmp_path/"launcher.log").read_text() or (
+        "[H3 STAGE END]" in (tmp_path/"launcher.log").read_text()
+    )
+
+
+def test_reuse_preinstalled_venv_without_running_uv(tmp_path):
+    from tools.launch_h3_rgba_a100 import a100_venv_ready
+    assert not a100_venv_ready(tmp_path/"absent/python")
