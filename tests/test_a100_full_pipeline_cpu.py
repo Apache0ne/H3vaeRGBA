@@ -5,7 +5,7 @@ import sys
 
 import pytest
 
-from tools.h3_a100_full_t2va import inspect_host, import_upstream, PATTERNS, MODEL_ID
+from tools.h3_a100_full_t2va import inspect_host, import_upstream, PATTERNS, MODEL_ID, cached_t2va_weights_present
 
 
 def test_a100_80gb_host_ram_53gb_is_allowed_with_phased_quantized_loading():
@@ -67,3 +67,26 @@ def test_generation_disk_check_is_not_another_155gb_after_model_download():
     assert not first["checks"]["free_disk_155gb"]
     assert after["checks"]["free_disk_10gb"]
     assert after["disk_required_decimal_gb"] == 10
+
+
+def test_preexisting_complete_h3_weight_cache_detected_without_redownloading(tmp_path):
+    home = tmp_path/"hf"
+    snapshot=home/"hub/models--MiniMaxAI--MiniMax-H3/snapshots/revision"
+    assert not cached_t2va_weights_present(home)
+    for name in ("transformer","text_encoder","vae","audio_vae"):
+        folder=snapshot/name
+        folder.mkdir(parents=True)
+        (folder/"config.json").write_text("{}")
+        (folder/"weights.safetensors.index.json").write_text(
+            json.dumps({"weight_map":{"weight":"weights.safetensors"}})
+        )
+        (folder/"weights.safetensors").write_bytes(b"x"*2048)
+    assert cached_t2va_weights_present(home)
+    (snapshot/"transformer/weights.safetensors").unlink()
+    assert not cached_t2va_weights_present(home)
+
+
+def test_invalid_disk_guard_phase_is_rejected():
+    with pytest.raises(ValueError):
+        inspect_host(gpu_gib=79.1,ram_total_gb=167,
+                     ram_available_gb=160,disk_free_gb=20,phase="unknown")
