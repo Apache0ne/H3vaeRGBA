@@ -111,3 +111,25 @@ def test_old_generation_report_never_suppresses_new_trained_lora(tmp_path):
     assert not generation_is_current(report,old)
     report.unlink()
     assert not generation_is_current(report,old)
+
+
+def test_final_holdout_scoring_requires_actual_alpha_match():
+    import torch
+    from tools.validate_h3_wan_holdout import score_clip, aggregate_holdout
+
+    rgba = torch.zeros(1,4,3,8,8)
+    rgba[:, :3] = 0.8
+    rgba[:, 3:, :, 2:6, 2:6] = 1.0
+    perfect = {"rgb": rgba[:, :3].clone(), "alpha": rgba[:, 3:].clone()}
+    metrics = score_clip(rgba, perfect)
+    assert metrics["alpha_iou"] == pytest.approx(1.0)
+    assert metrics["composite_rgb_l1"] == pytest.approx(0.0,abs=1e-6)
+    assert metrics["alpha_temporal_error"] == pytest.approx(0.0)
+    wrong = {"rgb": rgba[:, :3].clone(), "alpha": torch.ones_like(rgba[:, 3:])}
+    bad = score_clip(rgba, wrong)
+    assert bad["alpha_iou"] < 0.50
+    assert bad["composite_rgb_l1"] > 0.0
+    summary = aggregate_holdout([metrics, bad])
+    assert summary["alpha_iou"] < 1.0
+    with pytest.raises(ValueError, match="No reserved"):
+        aggregate_holdout([])
