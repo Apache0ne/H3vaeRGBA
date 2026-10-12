@@ -4,6 +4,9 @@
 # an isolated Python 3.12 venv. Do not install this into VAE LoRA venv.
 git+https://github.com/huggingface/diffusers.git@f37ab93e621d5ce206c9662e8291ca8b67d9c555
 transformers==5.14.1
+# Qwen3VLVideoProcessor imports torchvision; this exact version matches torch 2.9.0 cu128.
+# Install torch+torchvision together from https://download.pytorch.org/whl/cu128 first.
+torchvision==0.24.0
 accelerate==1.12.0
 safetensors
 huggingface_hub
