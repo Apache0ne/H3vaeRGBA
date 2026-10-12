@@ -226,28 +226,59 @@ def ensure_vae_pretrained():
     launch([sys.executable,REPO/"tools/verify_h3_cache.py"],cwd=REPO)
 
 
+def a100_venv_ready(py):
+    """Skip reinstalling 4-5GB CUDA packages on every retry.
+
+    Re-running uv pip install during H3 debugging wastes time and disk
+    even when the complete isolated A100 runtime is already functional.
+    """
+    if not Path(py).is_file():
+        return False
+    check=(
+        "import torch,torchvision,transformers,diffusers,torchao,"
+        "bitsandbytes,av,accelerate; "
+        "from transformers import Qwen3VLProcessor; "
+        "assert torch.__version__.split('+')[0]=='2.9.0'; "
+        "assert torchvision.__version__.split('+')[0]=='0.24.0'; "
+        "assert transformers.__version__=='5.14.1'; "
+        "print('A100_RUNTIME_ALREADY_INSTALLED',flush=True)"
+    )
+    try:
+        status=subprocess.run(
+            [str(py),"-c",check],
+            capture_output=True,text=True,timeout=90
+        )
+    except (OSError,subprocess.TimeoutExpired):
+        return False
+    if status.returncode==0:
+        print(status.stdout.strip(),flush=True)
+        return True
+    print("A100_RUNTIME_REPAIR_REQUIRED",status.stderr[-1200:],flush=True)
+    return False
+
+
 def prepare_h3_environment(venv):
     py=venv/"bin/python"
+    if a100_venv_ready(py):
+        print("[H3 DEPENDENCIES] Existing isolated CUDA environment "
+              "verified; skipping reinstall and preserving disk.",flush=True)
+        return py
+    print("[H3 DEPENDENCIES] Installing/repairing isolated Python 3.12 "
+          "runtime; may take several minutes",flush=True)
     launch([sys.executable,"-m","pip","install","-q","uv"])
     launch(["uv","python","install","3.12"])
     if not py.exists():
         launch(["uv","venv","--python","3.12",venv])
-    # Must be matched CUDA builds; torchvision is required by the Qwen3-VL
-    # video processor. Install them in the SAME venv, not Colab's /usr/bin/python.
     launch(["uv","pip","install","--python",py,
             "torch==2.9.0","torchvision==0.24.0",
             "--index-url","https://download.pytorch.org/whl/cu128"])
     launch(["uv","pip","install","--python",py,
             "-r",REPO/"requirements-a100-h3.txt"])
-    launch([py,"-c",
-            "import torch, torchvision; "
-            "from transformers import Qwen3VLProcessor; "
-            "from transformers.utils import is_torchvision_available; "
-            "assert is_torchvision_available(); "
-            "assert torch.__version__.split('+')[0]=='2.9.0'; "
-            "assert torchvision.__version__.split('+')[0]=='0.24.0'; "
-            "print('H3_QWEN_PROCESSOR_DEPENDENCIES_OK', "
-            "torch.__version__, torchvision.__version__)"])
+    if not a100_venv_ready(py):
+        raise RuntimeError(
+            "A100 environment still inconsistent after installation; "
+            "check the A100_RUNTIME_REPAIR_REQUIRED traceback"
+        )
     return py
 
 
