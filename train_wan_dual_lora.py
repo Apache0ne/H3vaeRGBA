@@ -184,6 +184,7 @@ def evaluate(codec, loader, args, *, step, output_dir):
               for key in records[0]}
     result["step"] = step
     say("VALIDATION",json.dumps(result))
+    maybe_save_best(codec, output_dir, result)
     with (output_dir / "validation.jsonl").open("a") as file:
         file.write(json.dumps(result)+"\n")
     return result
@@ -195,6 +196,23 @@ def alpha_losses_from_result(alpha, rgba, args):
         alpha_weight=args.alpha_weight, edge_weight=args.edge_weight,
         composite_weight=args.composite_weight, hard_weight=args.hard_weight,
         temporal_weight=args.temporal_weight)
+
+
+def maybe_save_best(codec, output, validation):
+    """Keep best alpha IoU adapter, breaking ties by lower alpha MAE."""
+    from safetensors.torch import save_file
+    target = output / "checkpoints"
+    target.mkdir(exist_ok=True, parents=True)
+    meta_path = target / "best_validation.json"
+    previous = json.loads(meta_path.read_text()) if meta_path.exists() else None
+    candidate = (validation["alpha_iou"], -validation["alpha_mae"])
+    if previous is not None and candidate <= (
+            previous["alpha_iou"], -previous["alpha_mae"]):
+        return False
+    save_file(codec.adapter_state(), str(target / "dual_lora_best.safetensors"))
+    meta_path.write_text(json.dumps(validation, indent=2))
+    say("NEW_BEST_LORA", json.dumps(validation))
+    return True
 
 
 def checkpoint(codec, optimizer, args, output, step, metrics):
