@@ -1,0 +1,113 @@
+"""Regression coverage for native H3 Wan two-stage training and inference gates.
+
+No mock metric is counted as GPU training quality: these are CPU contract tests.
+"""
+import json
+from types import SimpleNamespace
+
+import pytest
+
+from train_h3_wan_dit_lora import run_signature
+from tools.validate_h3_wan_cache import (
+    sha256, validate_joint_cache, validate_text_cache,
+)
+from tools.launch_h3_wan_native_a100 import generation_is_current
+
+
+def fixtures(tmp_path):
+    paths = {}
+    for name in ("bridge", "dual", "base_lora", "manifest", "captions"):
+        p = tmp_path / (name + ".safetensors")
+        p.write_bytes(("real " + name).encode())
+        paths[name] = p
+    latent = tmp_path / "latent.pt"
+    latent.write_bytes(b"nonempty-test-latent")
+    other = tmp_path / "val.pt"
+    other.write_bytes(b"nonempty-test-validation")
+    payload = {
+        "stage1_bridge_hash": sha256(paths["bridge"]),
+        "stage1_dual_hash": sha256(paths["dual"]),
+        "source_adapter_hash": sha256(paths["base_lora"]),
+        "manifest_hash": sha256(paths["manifest"]),
+        "captions_hash": sha256(paths["captions"]),
+        "samples": [
+            {"id": "clip-1", "caption": "a cat", "group": "train", "latent": str(latent)},
+            {"id": "clip-2", "caption": "a dog", "group": "validation", "latent": str(other)},
+        ],
+    }
+    index = tmp_path / "index.json"
+    index.write_text(json.dumps(payload))
+    paths["index"] = index
+    return paths
+
+
+def test_dit_resume_signature_includes_same_weight_mode_and_real_cache_hashes(tmp_path):
+    paths = fixtures(tmp_path)
+    args = SimpleNamespace(
+        rank=8, lr=2e-5, seed=42, weight_mode="bf16",
+        joint_index=str(paths["index"]), prompts_json=str(paths["captions"]),
+    )
+    saved = run_signature(args)
+    assert saved == run_signature(args)
+    assert saved["weight_mode"] == "bf16"
+    args.weight_mode = "int8"
+    assert saved != run_signature(args)
+    args.weight_mode = "bf16"
+    paths["captions"].write_bytes(b"different prompts")
+    assert saved != run_signature(args)
+
+
+def test_cache_provenance_refuses_changed_bridge_or_lost_latent(tmp_path):
+    paths = fixtures(tmp_path)
+    kwargs = {k: paths[k] for k in
+              ("bridge", "dual", "base_lora", "manifest", "captions")}
+    assert validate_joint_cache(paths["index"], **kwargs) == {
+        "train": 1, "validation": 1
+    }
+    paths["bridge"].write_bytes(b"updated VAE after more training")
+    with pytest.raises(RuntimeError, match="STALE_JOINT_CACHE"):
+        validate_joint_cache(paths["index"], **kwargs)
+    paths["bridge"].write_bytes(b"real bridge")
+    (tmp_path / "val.pt").unlink()
+    with pytest.raises(FileNotFoundError, match="clip-2"):
+        validate_joint_cache(paths["index"], **kwargs)
+
+
+def test_text_embeddings_are_bound_to_exact_latent_index(tmp_path):
+    paths = fixtures(tmp_path)
+    a = tmp_path / "a.pt"
+    b = tmp_path / "b.pt"
+    a.write_bytes(b"real embeddings A")
+    b.write_bytes(b"real embeddings B")
+    text = tmp_path / "prompts.json"
+    text.write_text(json.dumps({
+        "conditioner": "REAL_Qwen3VL_32B_H3_hidden_state_50",
+        "joint_index_sha256": sha256(paths["index"]),
+        "prompt_embeds_by_text": {"a cat": str(a), "a dog": str(b)},
+    }))
+    assert validate_text_cache(paths["index"], text) == 2
+    data = json.loads(paths["index"].read_text())
+    data["samples"][0]["caption"] = "another cat"
+    paths["index"].write_text(json.dumps(data))
+    with pytest.raises(RuntimeError, match="STALE_TEXT_CACHE"):
+        validate_text_cache(paths["index"], text)
+
+
+def test_old_generation_report_never_suppresses_new_trained_lora(tmp_path):
+    old = tmp_path / "adapter.safetensors"
+    old.write_bytes(b"first weight checkpoint")
+    movie = tmp_path / "video.mp4"
+    latents = tmp_path / "joint.pt"
+    movie.write_bytes(b"video")
+    latents.write_bytes(b"latents")
+    report = tmp_path / "wan_h3_generation.json"
+    report.write_text(json.dumps({
+        "dit_lora_hash": sha256(old),
+        "rgb_audio_mp4": str(movie),
+        "generated_latents": str(latents),
+    }))
+    assert generation_is_current(report,old)
+    old.write_bytes(b"new weight checkpoint")
+    assert not generation_is_current(report,old)
+    report.unlink()
+    assert not generation_is_current(report,old)
