@@ -12,6 +12,11 @@ import csv
 import io
 import json
 from pathlib import Path
+
+# Allow execution by absolute filename from /content Colab, not just repo cwd.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from urllib.request import urlopen
 
 
