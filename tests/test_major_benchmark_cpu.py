@@ -9,7 +9,7 @@ from PIL import Image
 
 from h3rgba.benchmark_metrics import (
     STRESS_CASES, binary_iou, boundary_f1, measure,
-    summarize, synthetic_rgba,
+    summarize, synthetic_rgba, threshold_diagnostics,
 )
 from benchmark_wan_dual import (
     group_summary, original_alpha, one_video, paired_bootstrap, partition,
@@ -179,3 +179,34 @@ def test_manifest_preflight_separates_unused_and_external_without_model(tmp_path
     rejected = subprocess.run(cmd,capture_output=True,text=True,timeout=30)
     assert rejected.returncode != 0
     assert "overlap training/validation" in rejected.stdout + rejected.stderr
+
+
+def test_oracle_threshold_reports_empty_gt_and_separates_calibration():
+    target = torch.zeros(1, 4, 3, 32, 32)
+    target[:, 3:4, :, 8:24, 8:24] = 1.
+    pred = torch.zeros(1, 1, 3, 32, 32)
+    pred[:, :, :, 8:24, 8:24] = .45
+    scored = threshold_diagnostics(pred, target)
+    assert scored["iou_threshold_0_5"] == 0.
+    assert scored["oracle_iou"] == 1.
+    assert scored["oracle_gain_over_half"] == 1.
+    assert scored["hard_gt_foreground_pixels"] == 3 * 16 * 16
+    assert not scored["degenerate_empty_hard_gt"]
+    assert "diagnostic only" in scored["note"]
+    target[:, 3:4] = .35
+    scored = threshold_diagnostics(torch.zeros_like(pred), target)
+    assert scored["degenerate_empty_hard_gt"]
+    assert scored["iou_threshold_0_5"] == 1.0
+
+
+def test_empty_binary_masks_excluded_from_nonempty_macro_and_worst_ids():
+    a = {"id":"smoke", "alpha_iou":.2, "alpha_mae":.02,
+         "pixels_intersection":2, "pixels_union":10, "pixels_foreground":5}
+    b = {"id":"partial_flat", "alpha_iou":1., "alpha_mae":.01,
+         "pixels_intersection":0, "pixels_union":0, "pixels_foreground":0}
+    s = summarize([a,b])
+    assert s["samples"] == 2
+    assert s["nonempty_gt_samples"] == 1
+    assert s["empty_gt_samples"] == 1
+    assert abs(s["alpha_iou_nonempty_gt"]-.2) < 1e-8
+    assert s["worst_three_iou"][0]["id"] == "smoke"
