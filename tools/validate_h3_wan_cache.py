@@ -66,6 +66,10 @@ def validate_joint_cache(index_path, *, bridge, dual, base_lora, manifest, capti
             raise RuntimeError(f"Missing real caption for {clip_id}")
         if not Path(row["latent"]).is_file():
             raise FileNotFoundError(f"Missing cached H3 latent for {clip_id}: {row['latent']}")
+        if row.get("latent_sha256") != sha256(row["latent"]):
+            raise RuntimeError(
+                f"STALE_JOINT_CACHE: latent tensor for {clip_id} changed or is corrupt"
+            )
         counts[group] += 1
     if min(counts.values()) < 1:
         raise RuntimeError("Joint cache lacks train or selection-validation samples")
