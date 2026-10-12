@@ -54,6 +54,21 @@ python tools/h3_full_diffusion_probe.py --preflight-only \
   --output-dir /content/h3_real_diffusion_probe
 ```
 
+To inspect the **actual published H3 t2va ModularPipeline definition**
+without downloading the 61.7GB transformer or 62.1GB conditioner weights,
+first install a current Modular Diffusers build (e.g. a **separate**
+full-H3 environment), then run:
+
+```bash
+python tools/h3_full_diffusion_probe.py --workflow-only \\
+  --output-dir /content/h3_real_diffusion_probe
+```
+
+This checks `ModularPipeline.from_pretrained(..., workflow="t2va")`,
+saves `h3_t2va_workflow_doc.txt`, and never calls `load_components`.
+On a low-memory runtime it can validate workflow wiring **but not execute
+the pretrained denoiser**. Results are labeled accordingly.
+
 For the **true model call**, use an environment with at least ~85 decimal GB
 **available** host RAM and ~155 GB free disk, plus BF16 CUDA. Run this in
 a separate fresh environment from the VAE training Python environment:
