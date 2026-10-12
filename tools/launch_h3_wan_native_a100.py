@@ -99,7 +99,25 @@ def run(args):
     launch(vae_args()+["--resume","--steps",str(args.vae_steps)])
     if not bridge.is_file() or not adapted.is_file():
         raise RuntimeError("Shared-latent VAE adaptation not saved")
-    print("[WAN STAGE 1 COMPLETE] Joint RGB and alpha VAE checkpoints",flush=True)
+    stage1_metrics=phases["vae"]/"checkpoints/joint_best_metrics.json"
+    if not stage1_metrics.is_file():
+        raise RuntimeError("No stage-1 joint-latent validation metrics available")
+    metrics=json.loads(stage1_metrics.read_text())
+    print("[WAN STAGE 1 QUALITY GATE]",json.dumps({
+        "best_alpha_iou":metrics.get("alpha_iou"),
+        "best_rgb_visible_l1":metrics.get("rgb_visible_l1"),
+        "minimum_alpha_iou":args.min_stage1_iou,
+        "maximum_rgb_l1":args.max_stage1_rgb_l1,
+    }),flush=True)
+    if (metrics.get("alpha_iou",0)<args.min_stage1_iou or
+        metrics.get("rgb_visible_l1",100)>args.max_stage1_rgb_l1):
+        raise RuntimeError(
+            "WAN JOINT STAGE 1 DID NOT ACHIEVE USEFUL SINGLE-STREAM RGBA "
+            "RECONSTRUCTION. STOPPING BEFORE COSTLY H3 33B DiT TRAINING. "
+            "Inspect joint VAE training/visuals and improve merger first. "
+            f"Best metrics: {metrics}"
+        )
+    print("[WAN STAGE 1 COMPLETE] Joint RGB and alpha VAE quality gate passed",flush=True)
 
     print("[WAN STAGE 2] Encode joint 24-channel latent video targets",flush=True)
     index=phases["latents"]/"index.json"
@@ -191,6 +209,10 @@ def main():
     p.add_argument("--vae-steps",type=int,default=1000)
     p.add_argument("--dit-steps",type=int,default=1000)
     p.add_argument("--dit-rank",type=int,default=8)
+    p.add_argument("--min-stage1-iou",type=float,default=.70,
+                   help="Require shared 24ch VAE IoU before spending 33B training compute")
+    p.add_argument("--max-stage1-rgb-l1",type=float,default=.12,
+                   help="Preserve original H3 RGB reconstruction before DiT training")
     p.add_argument("--height",type=int,default=544)
     p.add_argument("--width",type=int,default=960)
     p.add_argument("--seconds",type=float,default=5.)
