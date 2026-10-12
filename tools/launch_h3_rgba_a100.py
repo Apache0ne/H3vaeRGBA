@@ -202,12 +202,46 @@ def ensure_vae_lora(args,workdir,drive):
 
 
 def ensure_alpha_sidecar(args,vae_lora,manifest,drive):
+    """Never skip unfinished diffusion training merely because best.pt exists."""
+    import torch
+
     output=Path(args.run_root)/"alpha_diffusion"
-    best=output/"checkpoints/sidecar_best.pt"
-    existing=best_sidecar(drive,best)
-    if existing:
-        print("REUSING_TRAINED_ALPHA_DIFFUSION_MODEL",existing,flush=True)
-        return Path(existing)
+    folder=output/"checkpoints"
+    folder.mkdir(parents=True,exist_ok=True)
+    best=folder/"sidecar_best.pt"
+    latest=folder/"sidecar_latest.pt"
+
+    persistent=(Path(drive)/"H3_AlphaDiffusion/checkpoints" if drive else None)
+    if persistent is not None:
+        for name in ("sidecar_latest.pt","sidecar_best.pt"):
+            source=persistent/name
+            destination=folder/name
+            if source.is_file() and not destination.is_file():
+                shutil.copy2(source,destination)
+
+    if not latest.exists() and best.exists():
+        # Model selection checkpoint contains full optimizer state, but may
+        # precede the latest training step. Use as a valid fallback resume.
+        shutil.copy2(best,latest)
+
+    def read_step(path):
+        if not path.exists():
+            return 0
+        value=torch.load(path,map_location="cpu",weights_only=True)
+        return int(value["step"])
+
+    completed=read_step(latest)
+    if best.exists() and completed>=args.alpha_steps:
+        print("ALPHA_DIFFUSION_TARGET_TRAINING_COMPLETED",
+              json.dumps({"latest_step":completed,"best_step":read_step(best)}),
+              flush=True)
+        return best
+
+    if completed:
+        print("RESUMING_ALPHA_SIDECAR",
+              json.dumps({"step":completed,"target":args.alpha_steps}),
+              flush=True)
+
     cmd=[sys.executable,"-u",REPO/"train_h3_alpha_diffusion.py",
          "--manifest",manifest,
          "--vae-lora",vae_lora,
@@ -219,12 +253,12 @@ def ensure_alpha_sidecar(args,vae_lora,manifest,drive):
          "--val-every","250","--save-every","250",
          "--sampling-steps","30","--seed",args.seed]
     if drive:
-        cmd+=["--backup-dir",Path(drive)/"H3_AlphaDiffusion/checkpoints"]
-    if (output/"checkpoints/sidecar_latest.pt").exists():
+        cmd+=["--backup-dir",persistent]
+    if latest.exists():
         cmd+=["--resume"]
     launch(cmd,cwd=REPO)
-    if not best.exists():
-        raise RuntimeError("Alpha diffusion training did not produce a best checkpoint")
+    if not best.exists() or read_step(latest)<args.alpha_steps:
+        raise RuntimeError("Alpha diffusion training did not complete target steps")
     return best
 
 
