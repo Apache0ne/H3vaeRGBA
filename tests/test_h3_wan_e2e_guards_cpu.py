@@ -30,9 +30,13 @@ def fixtures(tmp_path):
         "source_adapter_hash": sha256(paths["base_lora"]),
         "manifest_hash": sha256(paths["manifest"]),
         "captions_hash": sha256(paths["captions"]),
+        "resolution": 256,
+        "seed": 42,
         "samples": [
-            {"id": "clip-1", "caption": "a cat", "group": "train", "latent": str(latent)},
-            {"id": "clip-2", "caption": "a dog", "group": "validation", "latent": str(other)},
+            {"id": "clip-1", "caption": "a cat", "group": "train", "latent": str(latent),
+             "latent_sha256": sha256(latent)},
+            {"id": "clip-2", "caption": "a dog", "group": "validation", "latent": str(other),
+             "latent_sha256": sha256(other)},
         ],
     }
     index = tmp_path / "index.json"
@@ -133,3 +137,21 @@ def test_final_holdout_scoring_requires_actual_alpha_match():
     assert summary["alpha_iou"] < 1.0
     with pytest.raises(ValueError, match="No reserved"):
         aggregate_holdout([])
+
+
+def test_reject_wrong_video_latent_resolution_or_split_seed(tmp_path):
+    paths=fixtures(tmp_path)
+    kwargs={k:paths[k] for k in ("bridge","dual","base_lora","manifest","captions")}
+    assert validate_joint_cache(paths["index"], resolution=256,seed=42,**kwargs)
+    with pytest.raises(RuntimeError,match="resolution"):
+        validate_joint_cache(paths["index"],resolution=128,seed=42,**kwargs)
+    with pytest.raises(RuntimeError,match="split seed"):
+        validate_joint_cache(paths["index"],resolution=256,seed=999,**kwargs)
+
+
+def test_corrupted_cached_latent_is_detected_before_33b_training(tmp_path):
+    paths=fixtures(tmp_path)
+    kwargs={k:paths[k] for k in ("bridge","dual","base_lora","manifest","captions")}
+    (tmp_path/"latent.pt").write_bytes(b"modified latent tensors")
+    with pytest.raises(RuntimeError,match="tensor for clip-1 changed"):
+        validate_joint_cache(paths["index"],**kwargs)
