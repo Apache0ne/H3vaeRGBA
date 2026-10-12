@@ -1,5 +1,16 @@
 # MiniMax-H3 RGBA research
 
+### Completing a full Colab run without GPU OOM or losing progress
+
+The user-measured 2-step BF16 dual-path training used **6.81 GiB peak reserved VRAM** on a **22.5 GiB** GPU, so continuing at the SAME 128x128/rank-4 configuration does **not** require 8-bit weights, model offload, or decreasing quality. 128px yields strong step-zero alpha IoU **0.86064** / MAE **0.04246**; step two IoU **0.86072**, so use best-validation LoRA rather than assuming more steps improve it.
+
+The trainer supports optional `--backup-dir /content/drive/MyDrive/H3_DualLoRA_backups` after mounting Google Drive through Colab. At every saved step it writes a new `step_0000XX/` snapshot containing the latest adapter, optimizer and metrics, then creates a `COMPLETE.json` marker **last**, retaining three newest complete snapshots. Recover by copying files from the newest COMPLETE snapshot back to the original `--output-dir`; restore dataset separately if a Colab runtime reset removed it.
+
+New optional `--max-runtime-minutes 150` performs a graceful validation/checkpoint/backup when that training-time budget is reached; rerun the same command with `--resume` until the requested total steps are reached. Both options are excluded from the model-optimizer settings signature and can be changed safely on resume.
+
+Never launch two trainers into the **same** output directory concurrently. The GPU memory screenshot showing idle 0.2 GiB is a momentary utilization measurement, not the peak allocation from training.
+
+
 ## Stage W — actual decoder-LoRA training inspired by Wan-Alpha and AlphaVAE (October 2026)
 
 **This replaces the unsuccessful original RGB->RGBA shared-latent VAE training experiment, without overwriting its checkpoints.** Measured original vs widened VAE RGB MAE 0.080935 vs 0.116372 with alpha IoU 0.448. RGB-preservation training reduced RGB MAE but left alpha IoU only 0.465 at 100 steps. More shared-latent weighting is not enough.
