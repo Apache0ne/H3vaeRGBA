@@ -43,7 +43,7 @@ def test_partial_alpha_and_compositing_are_measured():
     assert abs(m["alpha_partial_mae"] - .3) < 1e-6
     assert abs(m["alpha_mae"] - .3) < 1e-6
     assert m["alpha_gt_partial_fraction"] == 1
-    assert m["alpha_iou"] == 1.0  # both threshold masks empty
+    assert m["alpha_iou"] == 0.0  # target alpha .3 is below threshold; pred .6 above
     assert abs(m["composite_mae_black"] - .3) < 1e-6
     # Use a foreground that does NOT match the background to expose halo.
     gt[:, :3] = .2
