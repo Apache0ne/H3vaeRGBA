@@ -1,0 +1,53 @@
+"""No-GPU regression tests for A100 80GB full H3 diffusion launch."""
+import json
+import subprocess
+import sys
+
+import pytest
+
+from tools.h3_a100_full_t2va import inspect_host, import_upstream, PATTERNS, MODEL_ID
+
+
+def test_a100_80gb_host_ram_53gb_is_allowed_with_phased_quantized_loading():
+    proof=inspect_host(gpu_gib=79.1,ram_total_gb=53.,
+                       ram_available_gb=47.,disk_free_gb=181.)
+    assert proof["can_proceed"],proof
+    assert proof["checks"]["host_ram_at_least_40gb"]
+    assert "INT8" in proof["configuration"]
+    # Old official full-bf16 CPU-offload guard would reject 53GB, but
+    # phase-resident NF4+INT8 loader should not automatically reject it.
+    too_small_gpu=inspect_host(gpu_gib=22.4,ram_total_gb=53.,
+                        ram_available_gb=47.,disk_free_gb=181.)
+    assert not too_small_gpu["can_proceed"]
+    assert not too_small_gpu["checks"]["gpu_80gb_class"]
+    out_of_disk=inspect_host(gpu_gib=79.1,ram_total_gb=53.,
+                         ram_available_gb=47.,disk_free_gb=100.)
+    assert not out_of_disk["checks"]["free_disk_155gb"]
+
+
+def test_only_original_t2va_checkpoint_partitions_downloaded():
+    assert MODEL_ID=="MiniMaxAI/MiniMax-H3"
+    assert "transformer/*" in PATTERNS
+    assert "text_encoder/*" in PATTERNS
+    assert "vae/*" in PATTERNS
+    assert "audio_vae/*" in PATTERNS
+    assert "transformer_ref/*" not in PATTERNS
+    assert "Ref2VA/*" not in PATTERNS
+
+
+def test_a100_cli_preflight_works_without_model_or_gpu(tmp_path):
+    output=tmp_path/"report"
+    p=subprocess.run([
+        sys.executable,"tools/h3_a100_full_t2va.py","--preflight-only",
+        "--output-dir",str(output)
+    ],capture_output=True,text=True,timeout=60)
+    assert p.returncode==0,p.stdout+p.stderr
+    assert "A100_PHASED_RESOURCE_PREFLIGHT" in p.stdout
+    report=json.loads((output/"h3_a100_preflight.json").read_text())
+    assert "checks" in report
+    assert "available_host_ram_25gb" in report["checks"]
+
+
+def test_requires_actual_upstream_runner_directory(tmp_path):
+    with pytest.raises(FileNotFoundError,match="Missing external runner"):
+        import_upstream(tmp_path)
