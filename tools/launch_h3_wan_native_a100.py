@@ -28,6 +28,11 @@ import shutil
 import sys
 from pathlib import Path
 
+# Allow execution by absolute filename from /content Colab, not just repo cwd.
+import sys as _sys
+_sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+
 from tools.launch_h3_rgba_a100 import launch
 
 
