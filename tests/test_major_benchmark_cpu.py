@@ -144,3 +144,38 @@ def test_end_to_end_cpu_smoke_saves_json_csv_and_images(tmp_path):
     assert len(list(root.rglob("contact_sheet.png"))) == 4
     for image in root.rglob("contact_sheet.png"):
         assert Image.open(image).size == (4 * 32, 2 * 3 * 32)
+
+
+def test_manifest_preflight_separates_unused_and_external_without_model(tmp_path):
+    root = tmp_path/"bench"
+    train_manifest = tmp_path/"manifest.json"
+    external_manifest = tmp_path/"external.json"
+    records = [
+        {"id":f"video_{i}", "foreground":str(tmp_path/f"fgr_{i}.mp4"),
+         "alpha":str(tmp_path/f"pha_{i}.mp4"),"frames":21}
+        for i in range(30)
+    ]
+    train_manifest.write_text(json.dumps({"clips":records}))
+    ext = [
+        {"id":"external_0","foreground":str(tmp_path/"external_fgr.mp4"),
+         "alpha":str(tmp_path/"external_alpha.mp4"),"frames":21}
+    ]
+    external_manifest.write_text(json.dumps({"clips":ext}))
+    cmd = [sys.executable,"benchmark_wan_dual.py",
+           "--manifest",str(train_manifest),
+           "--external-manifest",str(external_manifest),
+           "--output-dir",str(root),"--preflight-only","--strict-unused"]
+    result = subprocess.run(cmd, capture_output=True,text=True,timeout=30)
+    assert result.returncode == 0, result.stdout + result.stderr
+    report = json.loads((root/"preflight.json").read_text())
+    assert report["mode"] == "MANIFEST_PREFLIGHT_NO_MODEL"
+    assert report["planned_groups"]["previously_validated"] == 3
+    assert report["planned_groups"]["unused_holdout"] == 3
+    assert report["planned_groups"]["external_dataset"] == 1
+    assert report["manifest"]["training_clip_count"] == 24
+    # Copying training files into 'external' must trigger explicit leakage failure.
+    ext[0]["foreground"] = records[0]["foreground"]
+    external_manifest.write_text(json.dumps({"clips":ext}))
+    rejected = subprocess.run(cmd,capture_output=True,text=True,timeout=30)
+    assert rejected.returncode != 0
+    assert "overlap training/validation" in rejected.stdout + rejected.stderr
