@@ -204,13 +204,14 @@ def import_upstream(repo):
 
 
 
-def validate_qwen_processor(*, offline=True):
-    """Catch missing torchvision or Qwen3-VL processor files BEFORE huge loading.
+def validate_qwen_processor(*, offline=False):
+    """Preflight the REAL H3 Qwen processor without loading the 33B weights.
 
-    The t2va ModularPipeline may silently skip loading an optional-looking
-    component. That leads to a much later NoneType create_mm_token_type_ids
-    error after 3+ minutes of loading GPU weights.
+    If offline=False, fetch only processor/* metadata/assets (~11.5 MB on
+    Hugging Face), using the existing cache and never downloading checkpoint
+    safetensors. The main T2VA cache check does not verify these small assets.
     """
+    import traceback
     try:
         import torch
         import torchvision
@@ -227,25 +228,33 @@ def validate_qwen_processor(*, offline=True):
                 f"H3 A100 runner expects torchvision 0.24.x, got "
                 f"{torchvision.__version__}"
             )
+        if not offline:
+            from huggingface_hub import snapshot_download
+            print("H3_PROCESSOR_METADATA_ONLY_DOWNLOAD",flush=True)
+            snapshot_download(
+                repo_id=MODEL_ID,
+                allow_patterns=["processor/*"],
+                max_workers=2,
+            )
         processor=Qwen3VLProcessor.from_pretrained(
-            MODEL_ID,subfolder="processor",local_files_only=offline,
+            MODEL_ID,subfolder="processor",local_files_only=True,
         )
         if not callable(getattr(processor,"create_mm_token_type_ids",None)):
             raise RuntimeError("Qwen3-VL processor missing create_mm_token_type_ids")
         print("H3_QWEN3VL_PROCESSOR_VERIFIED",
               json.dumps({"torch":torch.__version__,
                           "torchvision":torchvision.__version__,
-                          "processor":type(processor).__name__}),flush=True)
+                          "processor":type(processor).__name__,
+                          "processor_assets_only":True}),flush=True)
+        return processor
     except Exception as exc:
+        print("H3_QWEN_PROCESSOR_FULL_TRACEBACK",flush=True)
+        traceback.print_exc()
         raise RuntimeError(
-            "H3 Qwen3-VL processor preflight failed BEFORE loading the 33B "
-            "diffusion model. In /content/h3_a100_venv install the matching "
-            "torchvision CUDA wheel: "
-            "uv pip install --python /content/h3_a100_venv/bin/python "
-            "torchvision==0.24.0 "
-            "--index-url https://download.pytorch.org/whl/cu128 ; "
-            "then retry, preserving the existing H3 model cache. "
-            f"Original failure: {type(exc).__name__}: {exc}"
+            "Qwen3-VL processor preflight failed, BEFORE loading the 33B "
+            "transformer. This error may be missing torchvision, a package "
+            "mismatch, or missing processor metadata. See the full nested "
+            f"traceback above. Root exception: {type(exc).__name__}: {exc}"
         ) from exc
 
 
@@ -265,7 +274,7 @@ def generate(args):
 
     # Processor metadata and tokenizer are tiny compared with the 33B model.
     # Validate them before any large transformer/conditioner weight allocation.
-    validate_qwen_processor(offline=True)
+    validate_qwen_processor(offline=False)
     Runner=import_upstream(args.upstream_repo)
     output=Path(args.output_dir).resolve()
     output.mkdir(parents=True,exist_ok=True)
@@ -320,6 +329,8 @@ def main():
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
     modes=p.add_mutually_exclusive_group(required=True)
     modes.add_argument("--preflight-only",action="store_true")
+    modes.add_argument("--processor-check-only",action="store_true",
+                       help="Validate Qwen3-VL processor and download only ~11.5MB of metadata, not weights")
     modes.add_argument("--download-only",action="store_true")
     modes.add_argument("--generate",action="store_true")
     p.add_argument("--upstream-repo",default="/content/Diffusers_minimax-h3")
@@ -361,6 +372,10 @@ def main():
     (output/"h3_a100_preflight.json").write_text(json.dumps(proof,indent=2))
     print("A100_PHASED_RESOURCE_PREFLIGHT",json.dumps(proof,indent=2),flush=True)
     if args.preflight_only:
+        return
+    if args.processor_check_only:
+        validate_qwen_processor(offline=False)
+        print("H3_PROCESSOR_CHECK_ONLY_COMPLETE_NO_LARGE_WEIGHT_LOAD",flush=True)
         return
     if not proof["can_proceed"] and not args.skip_resource_guard:
         raise SystemExit("RESOURCE_PREFLIGHT_BLOCKED: inspect h3_a100_preflight.json")
