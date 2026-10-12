@@ -1,0 +1,14 @@
+# Separate environment for REAL full MiniMax-H3 generation, NOT the pinned VAE LoRA trainer.
+# H3 full pipeline requires current ModularPipeline / MiniMax-H3 blocks.
+# IMPORTANT: do not run tools/colab_compat.py --repair here: it can uninstall torchao.
+git+https://github.com/huggingface/diffusers.git@main
+transformers>=4.57
+accelerate>=1.0
+huggingface_hub>=0.35
+safetensors>=0.5
+torchao>=0.16
+imageio>=2.34
+imageio-ffmpeg>=0.5
+av>=11
+psutil>=6
+pillow>=10
