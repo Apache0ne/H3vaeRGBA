@@ -53,6 +53,8 @@ def config():
                    help="Skip dataset manifest and test generated stress clips only")
     p.add_argument("--cpu-smoke", action="store_true",
                    help="Tiny random H3 CPU integration test; not a trained-model score")
+    p.add_argument("--preflight-only", action="store_true",
+                   help="Inspect held-out coverage / external overlap and exit without loading model")
     p.add_argument("--preview-limit", type=int, default=4,
                    help="Per-group preview limit; all stress cases render previews")
     p.add_argument("--bootstrap", type=int, default=2000)
@@ -338,6 +340,16 @@ def main():
                                       "file_path_disjoint":True,
                                       "near_duplicate_content_audited":False}
     items["synthetic_stress"] = cases[:2] if args.cpu_smoke else cases
+    if args.preflight_only:
+        report = {
+            "mode": "MANIFEST_PREFLIGHT_NO_MODEL",
+            "manifest": manifest_proof,
+            "planned_groups": {key: len(value) for key,value in items.items()},
+            "warning": "No VAE inference and no trained checkpoint was tested.",
+        }
+        (output / "preflight.json").write_text(json.dumps(report,indent=2))
+        print("BENCHMARK_PREFLIGHT_OK", json.dumps(report), flush=True)
+        return
     device = torch.device("cpu" if args.cpu_smoke else "cuda")
     if not args.cpu_smoke:
         if not torch.cuda.is_available() or not torch.cuda.is_bf16_supported():
