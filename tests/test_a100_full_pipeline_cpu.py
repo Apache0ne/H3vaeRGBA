@@ -109,3 +109,13 @@ def test_full_h3_requirements_pin_cuda_compatible_torchvision():
     assert "torchvision==0.24.0" in requirements
     assert '"torch==2.9.0","torchvision==0.24.0"' in launcher
     assert "https://download.pytorch.org/whl/cu128" in launcher
+
+
+def test_qwen_processor_preflight_downloads_only_small_assets_before_weights():
+    script = (Path(__file__).resolve().parents[1] /
+              "tools/h3_a100_full_t2va.py").read_text()
+    assert 'allow_patterns=["processor/*"]' in script
+    assert 'modes.add_argument("--processor-check-only"' in script
+    assert 'H3_PROCESSOR_CHECK_ONLY_COMPLETE_NO_LARGE_WEIGHT_LOAD' in script
+    assert 'validate_qwen_processor(offline=False)' in script
+    assert 'traceback.print_exc()' in script
