@@ -23,7 +23,9 @@ from pathlib import Path
 
 import torch
 
-from h3rgba.benchmark_metrics import STRESS_CASES, measure, summarize, synthetic_rgba
+from h3rgba.benchmark_metrics import (
+    STRESS_CASES, measure, summarize, synthetic_rgba, threshold_diagnostics,
+)
 from h3rgba.decoder_lora import temporarily_disable_decoder_lora
 from h3rgba.vae import image_net_stats
 
@@ -132,8 +134,12 @@ def one_video(codec, rgba, *, include_rgb=True):
         rgb = codec.decode_rgb(zr) if include_rgb else None
         baseline_metrics = measure(baseline, rgba, pred_rgb=rgb)
         trained_metrics = measure(trained, rgba, pred_rgb=rgb)
+        baseline_thresholds = threshold_diagnostics(baseline, rgba)
+        trained_thresholds = threshold_diagnostics(trained, rgba)
     return {
         "baseline": baseline_metrics, "trained": trained_metrics,
+        "baseline_thresholds": baseline_thresholds,
+        "trained_thresholds": trained_thresholds,
         "delta_alpha_iou": trained_metrics["alpha_iou"] - baseline_metrics["alpha_iou"],
         "delta_alpha_mae": trained_metrics["alpha_mae"] - baseline_metrics["alpha_mae"],
         "delta_boundary_f1": trained_metrics["alpha_boundary_f1_1px"] -
@@ -169,8 +175,19 @@ def group_summary(rows, *, bootstrap=2000):
         return {"samples": 0, "baseline": None, "trained": None}
     return {
         "samples": len(rows),
-        "baseline": summarize([x["baseline"] for x in rows]),
-        "trained": summarize([x["trained"] for x in rows]),
+        "baseline": summarize([{"id":r["id"], **r["baseline"]} for r in rows]),
+        "trained": summarize([{"id":r["id"], **r["trained"]} for r in rows]),
+        "threshold_calibration": {
+            "mean_oracle_gain_trained": (
+                sum(r["trained_thresholds"]["oracle_gain_over_half"]
+                    for r in rows)/len(rows)
+            ),
+            "mean_oracle_gain_original": (
+                sum(r["baseline_thresholds"]["oracle_gain_over_half"]
+                    for r in rows)/len(rows)
+            ),
+            "note": "Oracle gain chooses threshold using this test clip. Diagnostic, not held-out performance.",
+        },
         "delta_alpha_iou": paired_bootstrap(rows, "alpha_iou", bootstrap),
         "delta_alpha_mae": paired_bootstrap(rows, "alpha_mae", bootstrap),
         "improved_iou_samples": sum(r["delta_alpha_iou"] > 0 for r in rows),
@@ -389,7 +406,9 @@ def main():
         writer=csv.writer(file)
         writer.writerow(["group","id","model","alpha_iou","alpha_mae",
                          "boundary_f1_1px","soft_iou","partial_mae","temporal_delta_mae",
-                         "composite_black","composite_white","rgb_visible_mae","seconds"])
+                         "composite_black","composite_white","rgb_visible_mae",
+                         "oracle_threshold_testclip","oracle_iou_testclip",
+                         "gt_hard_foreground_pixels","seconds"])
         for group,rows in groups.items():
             for row in rows:
                 for label in ("baseline","trained"):
@@ -398,7 +417,11 @@ def main():
                                      m["alpha_boundary_f1_1px"],m["alpha_soft_iou"],
                                      m["alpha_partial_mae"],m["alpha_temporal_delta_mae"],
                                      m["composite_mae_black"],m["composite_mae_white"],
-                                     m.get("rgb_visible_mae"),row["seconds"]])
+                                     m.get("rgb_visible_mae"),
+                                     row[label+"_thresholds"]["oracle_threshold"],
+                                     row[label+"_thresholds"]["oracle_iou"],
+                                     row[label+"_thresholds"]["hard_gt_foreground_pixels"],
+                                     row["seconds"]])
     markdown=["# Major H3 VAE alpha-decoder benchmark",
               "",
               f"Mode: **{report['mode']}**. Resolution: {args.resolution}.",
