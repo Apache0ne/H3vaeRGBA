@@ -66,23 +66,30 @@ def batch_from_record(row,device):
             tags.to(device,dtype=torch.long))
 
 
-def load_transformer(rank):
-    from diffusers import MiniMaxH3Transformer3DModel,TorchAoConfig
-    from torchao.quantization import Int8WeightOnlyConfig
-    print("LOADING_OFFICIAL_H3_33B_INT8_FOR_WAN_JOINT_DIFFUSION_LORA",flush=True)
-    model=MiniMaxH3Transformer3DModel.from_pretrained(
-        "MiniMaxAI/MiniMax-H3",subfolder="transformer",
+def load_transformer(rank,weight_mode="bf16"):
+    from diffusers import MiniMaxH3Transformer3DModel
+    print("LOADING_OFFICIAL_H3_33B_WAN_JOINT_DIFFUSION_LORA",json.dumps({
+        "weight_mode":weight_mode,"notes":"Full BF16 preferred on A100 80GB for verified "
+        "autograd through frozen base. Int8 backward remains experimental."}),flush=True)
+    kwargs=dict(
         dtype=torch.bfloat16,
-        quantization_config=TorchAoConfig(
+        local_files_only=True,
+        low_cpu_mem_usage=True,
+    )
+    if weight_mode=="int8":
+        from diffusers import TorchAoConfig
+        from torchao.quantization import Int8WeightOnlyConfig
+        kwargs["quantization_config"]=TorchAoConfig(
             Int8WeightOnlyConfig(version=2),
             modules_to_not_convert=[
                 "proj_in","audio_proj_in","context_embedder",
                 "time_embedder","time_proj","token_refiner",
                 "norm_out","proj_out","audio_proj_out",
-            ]
-        ),
-        low_cpu_mem_usage=False,
-        local_files_only=True,
+            ])
+    elif weight_mode!="bf16":
+        raise ValueError("weight_mode must be bf16 or int8")
+    model=MiniMaxH3Transformer3DModel.from_pretrained(
+        "MiniMaxAI/MiniMax-H3",subfolder="transformer",**kwargs
     )
     model.to("cuda")
     model.enable_gradient_checkpointing()
@@ -128,6 +135,7 @@ def save(model,optimizer,args,step,best,*,new_best=False):
         "optimizer":optimizer.state_dict(),
         "settings":{
             "rank":args.rank,"lr":args.lr,"seed":args.seed,
+            "weight_mode":args.weight_mode,
             "joint_index_hash":filehash(args.joint_index),
             "prompts_hash":filehash(args.prompts_json),
         }
@@ -175,6 +183,9 @@ def main():
     p.add_argument("--backup-dir",default=None)
     p.add_argument("--steps",type=int,default=2)
     p.add_argument("--rank",type=int,default=8)
+    p.add_argument("--weight-mode",choices=("bf16","int8"),default="bf16",
+                   help="BF16 base on A100 80GB preferred for LoRA backward; "
+                        "int8 training is experimental")
     p.add_argument("--lr",type=float,default=2e-5)
     p.add_argument("--seed",type=int,default=42)
     p.add_argument("--save-every",type=int,default=50)
@@ -199,7 +210,7 @@ def main():
         raise RuntimeError("GPU with BF16 required")
     torch.manual_seed(args.seed)
     random.seed(args.seed)
-    model=load_transformer(args.rank)
+    model=load_transformer(args.rank,weight_mode=args.weight_mode)
     optimizer=torch.optim.AdamW(
         (q for q in model.parameters() if q.requires_grad),
         lr=args.lr,weight_decay=0.01)
