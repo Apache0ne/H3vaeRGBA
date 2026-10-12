@@ -45,6 +45,10 @@ def arguments():
     p.add_argument("--resume", action="store_true")
     p.add_argument("--eval-only", action="store_true")
     p.add_argument("--preflight-only", action="store_true", help="Audit and decode dataset, no H3 VAE or CUDA")
+    p.add_argument("--backup-dir", default=None,
+                   help="Optional persistent directory (e.g. mounted Drive); per-step snapshots")
+    p.add_argument("--max-runtime-minutes", type=float, default=None,
+                   help="At or after this many training minutes, validate, checkpoint and exit cleanly")
     return p.parse_args()
 
 
@@ -71,6 +75,8 @@ def check_args(args):
         raise ValueError("Loss weights must be nonnegative")
     if args.resume and args.eval_only:
         raise ValueError("--resume and --eval-only are mutually exclusive")
+    if args.max_runtime_minutes is not None and args.max_runtime_minutes <= 0:
+        raise ValueError("--max-runtime-minutes must be > 0")
 
 
 def get_loaders(args):
@@ -215,6 +221,59 @@ def maybe_save_best(codec, output, validation):
     return True
 
 
+def backup_snapshot(output, backup_dir, step, *, keep=3):
+    """Copy a complete restorable snapshot; mark COMPLETE only after all copies.
+
+    The original local output remains the source of truth while training.
+    Incomplete snapshots are ignored on restoration. Last and best adapter,
+    optimizer and metrics are kept together to avoid resuming mismatched states.
+    """
+    output = Path(output).resolve()
+    root = Path(backup_dir).expanduser().resolve()
+    if root == output or output in root.parents or root in output.parents:
+        raise ValueError("Backup must be outside the training output directory")
+    root.mkdir(parents=True, exist_ok=True)
+    name = f"step_{step:06d}"
+    tmp = root / (name + ".incomplete")
+    complete = root / name
+    if complete.exists() and (complete / "COMPLETE.json").is_file():
+        return complete
+    if tmp.exists():
+        shutil.rmtree(tmp)
+    tmp.mkdir(parents=True)
+    paths = [
+        "checkpoints/dual_lora_last.safetensors",
+        "checkpoints/optimizer_last.pt",
+        "checkpoints/dual_lora_best.safetensors",
+        "checkpoints/best_validation.json",
+        "settings.json", "validation.jsonl", "metrics.jsonl",
+        "pretrained_weight_verification.json",
+    ]
+    required = {"checkpoints/dual_lora_last.safetensors",
+                "checkpoints/optimizer_last.pt", "settings.json"}
+    for relative in paths:
+        source = output / relative
+        if not source.exists():
+            if relative in required:
+                raise FileNotFoundError(f"Cannot make complete backup: {source}")
+            continue
+        dest = tmp / relative
+        dest.parent.mkdir(exist_ok=True, parents=True)
+        shutil.copy2(source, dest)
+    # COMPLETE.json is a commit marker created only when all copies succeed.
+    (tmp / "COMPLETE.json").write_text(json.dumps({"step": step}, indent=2))
+    if complete.exists():
+        shutil.rmtree(complete)
+    os.replace(tmp, complete)
+    snapshots = sorted(
+        path for path in root.glob("step_*")
+        if path.is_dir() and (path / "COMPLETE.json").exists()
+    )
+    for old in snapshots[:-keep]:
+        shutil.rmtree(old)
+    return complete
+
+
 def checkpoint(codec, optimizer, args, output, step, metrics):
     import torch
     from safetensors.torch import save_file
@@ -228,6 +287,9 @@ def checkpoint(codec, optimizer, args, output, step, metrics):
                 "settings":settings(args),"metrics":metrics},temporary)
     os.replace(temporary,folder/"optimizer_last.pt")
     say("CHECKPOINT",str(path),round(path.stat().st_size/2**20,2),"MiB")
+    if args.backup_dir:
+        backup = backup_snapshot(output, args.backup_dir, step)
+        say("PERSISTENT_BACKUP",str(backup))
 
 
 def main():
@@ -291,6 +353,8 @@ def main():
     optimizer.zero_grad(set_to_none=True)
     micro = 0
     epoch = 0
+    training_started = time.monotonic()
+    stopped_for_time = False
     while step < args.steps:
         epoch += 1
         for rgba in train_loader:
@@ -315,14 +379,25 @@ def main():
             with (output/"metrics.jsonl").open("a") as file:
                 file.write(json.dumps(result)+"\n")
             del loss,pred,rgba
-            if step % args.val_every == 0 or step == 1 or step == args.steps:
+            time_limit = (args.max_runtime_minutes is not None and
+                          (time.monotonic() - training_started) >=
+                          args.max_runtime_minutes * 60)
+            if step % args.val_every == 0 or step == 1 or step == args.steps or time_limit:
                 evaluate(codec,val_loader,args,step=step,output_dir=output)
-            if step % args.save_every == 0 or step == args.steps:
+            if step % args.save_every == 0 or step == args.steps or time_limit:
                 checkpoint(codec,optimizer,args,output,step,result)
+            if time_limit:
+                stopped_for_time = True
+                say("GRACEFUL_TIME_STOP",json.dumps({"saved_step":step,"total_steps":args.steps}))
+                break
             if step >= args.steps:
                 break
-    say("FINISHED",json.dumps({"steps":step,"checkpoint":str(folder/"dual_lora_last.safetensors"),
-                                "validation":str(output/"validation.jsonl")}))
+        if stopped_for_time:
+            break
+    say("FINISHED" if step >= args.steps else "PAUSED",json.dumps(
+        {"steps":step,"target_steps":args.steps,
+         "checkpoint":str(folder/"dual_lora_last.safetensors"),
+         "validation":str(output/"validation.jsonl")}))
     say("NOTE: only VAE decoder alpha LoRA trained; full H3 33B DiT was never loaded.")
 
 
