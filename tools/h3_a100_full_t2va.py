@@ -46,7 +46,11 @@ PATTERNS = (
 
 
 def inspect_host(*, gpu_gib=None, ram_available_gb=None,
-                 ram_total_gb=None, disk_free_gb=None):
+                 ram_total_gb=None, disk_free_gb=None,
+                 phase="download", disk_path=None):
+    """Before download require storage for weights; after download just working space."""
+    if phase not in ("download", "generate"):
+        raise ValueError("phase must be download or generate")
     """A100-phase residency check; NOT the 85GB CPU-streaming guard."""
     import psutil
     if gpu_gib is None:
@@ -58,9 +62,16 @@ def inspect_host(*, gpu_gib=None, ram_available_gb=None,
         ram_available_gb = vm.available / 1e9
     if ram_total_gb is None:
         ram_total_gb = vm.total / 1e9
+    if disk_path is None:
+        disk_path = os.environ.get("HF_HOME") or (
+            "/content" if Path("/content").exists() else "/")
+    disk_path = Path(disk_path).expanduser()
+    disk_path.mkdir(parents=True, exist_ok=True)
     if disk_free_gb is None:
-        disk_free_gb = shutil.disk_usage("/content" if Path("/content").exists()
-                                         else "/").free / 1e9
+        disk_free_gb = shutil.disk_usage(disk_path).free / 1e9
+    # Once weights are downloaded, generation requires only working space,
+    # not an additional 155 GB of free storage.
+    required_disk_gb = 155. if phase == "download" else 10.
     # Peak VRAM 59.7GB upstream; 70GiB minimum provides meaningful margin
     # without assuming full 80GiB free. Host RAM ~53GB is fine in principle,
     # but peak load-time RAM still must be measured, not inferred.
@@ -68,13 +79,17 @@ def inspect_host(*, gpu_gib=None, ram_available_gb=None,
         "gpu_80gb_class": gpu_gib >= 70.0,
         "host_ram_at_least_40gb": ram_total_gb >= 40.0,
         "available_host_ram_25gb": ram_available_gb >= 25.0,
-        "free_disk_155gb": disk_free_gb >= 155.0,
+        ("free_disk_155gb" if phase=="download" else "free_disk_10gb"):
+            disk_free_gb >= required_disk_gb,
     }
     return {
         "gpu_gib":round(gpu_gib,2),
         "host_ram_total_decimal_gb":round(ram_total_gb,2),
         "host_ram_available_decimal_gb":round(ram_available_gb,2),
         "disk_free_decimal_gb":round(disk_free_gb,2),
+        "disk_check_path":str(disk_path.resolve()),
+        "disk_phase":phase,
+        "disk_required_decimal_gb":required_disk_gb,
         "checks": checks, "can_proceed":all(checks.values()),
         "configuration":"GPU NF4 Qwen text + INT8 H3 transformer, "
                         "SDPA on Ampere, phase-managed VAE",
@@ -213,6 +228,10 @@ def main():
     modes.add_argument("--generate",action="store_true")
     p.add_argument("--upstream-repo",default="/content/Diffusers_minimax-h3")
     p.add_argument("--output-dir",default="/content/h3_a100_diffusion_output")
+    p.add_argument("--hf-home",default=None,
+                   help="Explicit writable Hugging Face cache home, e.g. scratch mount")
+    p.add_argument("--disk-phase",choices=("download","generate"),default="download",
+                   help="Storage required for preflight: before weights or after download")
     p.add_argument("--height",type=int,default=544)
     p.add_argument("--width",type=int,default=960)
     p.add_argument("--seconds",type=float,default=5.0)
@@ -226,13 +245,18 @@ def main():
     p.add_argument("--skip-resource-guard",action="store_true",
                    help="Override safety check after inspecting system manually")
     args=p.parse_args()
+    if args.hf_home:
+        # Must take effect BEFORE huggingface_hub or diffusers are imported.
+        home=Path(args.hf_home).expanduser().resolve()
+        home.mkdir(parents=True,exist_ok=True)
+        os.environ["HF_HOME"]=str(home)
     if args.height<256 or args.width<256 or args.height%32 or args.width%32:
         p.error("Height/width must be >=256 and divisible by 32")
     if args.seconds<5 or args.seconds>15 or args.steps<3:
         p.error("Seconds must be 5..15 and steps >=3")
     output=Path(args.output_dir)
     output.mkdir(parents=True,exist_ok=True)
-    proof=inspect_host()
+    proof=inspect_host(phase=("generate" if args.generate else args.disk_phase))
     (output/"h3_a100_preflight.json").write_text(json.dumps(proof,indent=2))
     print("A100_PHASED_RESOURCE_PREFLIGHT",json.dumps(proof,indent=2),flush=True)
     if args.preflight_only:
