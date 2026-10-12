@@ -169,17 +169,21 @@ def run(args):
         raise FileNotFoundError("Need existing isolated A100 H3 Python 3.12: "+str(py))
     print("[WAN STAGE 3] Cache real caption Qwen3-VL-32B embeddings",flush=True)
     prompts=phases["text"]/"prompts.json"
+    # Missing manifest cannot establish integrity of existing per-prompt files.
+    force_qwen_reencode=not prompts.is_file()
     if prompts.is_file():
         try:
             validate_text_cache(index, prompts)
         except (RuntimeError, FileNotFoundError, KeyError, ValueError) as exc:
             print("[WAN STAGE 3] Invalid cached text prompts, rebuilding:", exc, flush=True)
             prompts.unlink()
+            force_qwen_reencode=True
     if not prompts.is_file():
         launch([py,"-u",REPO/"tools/cache_h3_wan_text_embeddings.py",
                 "--joint-index",index,
                 "--output-dir",phases["text"],
-                "--upstream-repo",args.upstream_repo])
+                "--upstream-repo",args.upstream_repo,
+                *(["--force-reencode"] if force_qwen_reencode else [])])
     count=validate_text_cache(index,prompts)
     print("[WAN STAGE 3 COMPLETE] Verified REAL Qwen embeds:",
           count,"unique prompts; GPU TE process released",flush=True)
