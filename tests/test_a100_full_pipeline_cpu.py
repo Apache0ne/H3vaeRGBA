@@ -51,3 +51,19 @@ def test_a100_cli_preflight_works_without_model_or_gpu(tmp_path):
 def test_requires_actual_upstream_runner_directory(tmp_path):
     with pytest.raises(FileNotFoundError,match="Missing external runner"):
         import_upstream(tmp_path)
+
+
+def test_generation_disk_check_is_not_another_155gb_after_model_download():
+    # Once 144 GB of weights are already on disk, 65 GB remaining is enough
+    # for a generation working directory. Pre-download requires >=155 GB.
+    first = inspect_host(gpu_gib=79.1, ram_total_gb=167,
+                         ram_available_gb=150, disk_free_gb=65,
+                         phase="download")
+    after = inspect_host(gpu_gib=79.1, ram_total_gb=167,
+                         ram_available_gb=150, disk_free_gb=65,
+                         phase="generate")
+    assert not first["can_proceed"]
+    assert after["can_proceed"]
+    assert not first["checks"]["free_disk_155gb"]
+    assert after["checks"]["free_disk_10gb"]
+    assert after["disk_required_decimal_gb"] == 10
