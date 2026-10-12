@@ -92,11 +92,47 @@ def build(args,device):
     return codec
 
 
+def save_validation_preview(rgba,result,output,step):
+    """Visible ground-truth vs single-latent RGB/alpha and checkerboard."""
+    import numpy as np
+    from PIL import Image, ImageDraw
+    base=Path(output)/"previews"
+    base.mkdir(parents=True,exist_ok=True)
+    gt=rgba[0].detach().cpu().float().clamp(0,1)
+    pred_rgb=result["rgb"][0].detach().cpu().float().clamp(0,1)
+    pred_a=result["alpha"][0].detach().cpu().float().clamp(0,1)
+    selected=[0,8,16]
+    _,frames,h,w=gt.shape
+    sheet=Image.new("RGB",(w*5,len(selected)*(h+24)),(25,25,25))
+    draw=ImageDraw.Draw(sheet)
+    labels=["GT RGB","Joint RGB","GT alpha","Joint alpha","Joint over checker"]
+    ygrid,xgrid=np.indices((h,w))
+    checker=(np.where((xgrid//8+ygrid//8)%2,175,235)
+             .astype(np.float32)[:,:,None])
+    for row,index in enumerate(selected):
+        gt_rgb=gt[:3,index].permute(1,2,0).numpy()
+        reconstructed=pred_rgb[:,index].permute(1,2,0).numpy()
+        gt_alpha=gt[3,index].numpy()[:,:,None]
+        estimated=pred_a[0,index].numpy()[:,:,None]
+        check_rgb=np.repeat(checker,3,axis=2)/255
+        imgs=[gt_rgb,reconstructed,np.repeat(gt_alpha,3,axis=2),
+              np.repeat(estimated,3,axis=2),
+              reconstructed*estimated+check_rgb*(1-estimated)]
+        for col,(label,img) in enumerate(zip(labels,imgs)):
+            x=col*w;y=row*(h+24)
+            draw.text((x+4,y+4),label+" f"+str(index),fill="white")
+            sheet.paste(Image.fromarray(
+                np.uint8(np.rint(np.clip(img,0,1)*255))), (x,y+24))
+    path=base/f"step_{step:06d}.png"
+    sheet.save(path)
+    print("WAN_JOINT_RGB_ALPHA_PREVIEW",path,flush=True)
+
+
 @torch.no_grad()
-def validate(model,loader,step):
+def validate(model,loader,step,output=None):
     model.eval()
     totals=[]
-    for batch in loader:
+    for i,batch in enumerate(loader):
         rgba=batch.to("cuda",dtype=torch.float32)
         result=model(rgba)
         scores=alpha_scores(result["alpha"],rgba[:,3:4])
@@ -105,6 +141,8 @@ def validate(model,loader,step):
         scores["joint_shift_mse"]=float(
             (result["joint"]-result["rgb_teacher_latent"]).square().mean())
         totals.append(scores)
+        if i==0 and output is not None:
+            save_validation_preview(rgba,result,output,step)
     model.train()
     aggregate={key:round(sum(x[key] for x in totals)/len(totals),6)
                for key in totals[0]}
@@ -214,7 +252,7 @@ def run(args):
             }),flush=True)
         selected=False
         if step%args.val_every==0 or step==args.steps:
-            scored=validate(model,val,step)
+            scored=validate(model,val,step,output=out)
             with (out/"validation.jsonl").open("a") as f:
                 f.write(json.dumps(scored)+"\n")
             if (best is None or
