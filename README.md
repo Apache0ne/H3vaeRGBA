@@ -1,5 +1,70 @@
 # MiniMax-H3 RGBA research
 
+## Stage W — actual decoder-LoRA training inspired by Wan-Alpha and AlphaVAE (October 2026)
+
+**This replaces the unsuccessful original RGB->RGBA shared-latent VAE training experiment, without overwriting its checkpoints.** Measured original vs widened VAE RGB MAE 0.080935 vs 0.116372 with alpha IoU 0.448. RGB-preservation training reduced RGB MAE but left alpha IoU only 0.465 at 100 steps. More shared-latent weighting is not enough.
+
+### What the cited projects actually do
+
+- [Wan-Alpha VAE training code](https://github.com/WeChatCV/Wan-Alpha/blob/main/Wan-Alpha-VAE-train/train_vae.py): pretrained VAE copies for foreground and alpha, **decoder convolution LoRAs**, alpha and foreground encoders, trainable latent mapping, compositing (soft and hard random backgrounds), Sobel, VGG, and T2V diffusion loss.
+- [AlphaVAE training code](https://github.com/o0o0o00o0/AlphaVAE/blob/main/train/train_vae.py): blends RGBA over backgrounds to encode, reconstruction loss defined on background compositing, optional perceptual/KL terms. Full VAE fine-tuning, not merely alpha head.
+- [FLUX.2 Klein Alpha](https://github.com/TR-MZ/flux2-klein-alpha): separate finetuned RGBA VAE and DiT extraction/removal LoRAs; latter train the 4B/9B image generation transformer, **not** the VAE.
+- H3 is different: [its VAE has a 36-layer 2048-wide transformer decoder](https://huggingface.co/MiniMaxAI/MiniMax-H3/blob/main/vae/config.json), not Wan's convolutional decoder. We adapt the architectural **principles** but use H3 decoder **attention/MLP Linear LoRA**.
+
+### Stage W architecture
+
+```text
+Ground truth RGBA video  [B,4,17,128,128]
+       |                              |
+       | foreground RGB (3ch)         | alpha copied to RGB grayscale (3ch)
+       v                              v
+FROZEN official H3 encoder       SAME FROZEN official H3 encoder
+       | 24ch RGB latents             | 24ch alpha latents
+       +--------------+---------------+
+                      |
+             zero-init residual latent merger 48->24
+                      |
+          pretrained H3 36-layer decoder
+             with trainable rank-4 LoRA
+                      |
+          trainable grayscale output head 3->1
+                      |
+              predicted alpha [B,1,17,H,W]
+
+RGB reconstruct: RGB latents -> ORIGINAL H3 decoder with LoRA DISABLED
+                              -> RGB, unchanged after any alpha training
+Combine the original RGB and learned alpha only for previews.
+```
+
+The merger is zero-initialized, so at step 0 the alpha path is an original RGB video VAE encoding/decoding a grayscale alpha video. Decoder LoRA starts as identity. All original encoder/decoder parameters remain frozen; LoRA, merger and head are the only trainable tensors. The model loads the original 10.416 GB checkpoint **once**, and it compares in-memory pretrained weights against the actual three safetensors shards.
+
+**Limitations:** This is a supervised **video VAE alpha reconstruction LoRA**, not an H3 33B DiT LoRA. Alpha encoding presently requires a supplied alpha stream. Without subsequently training H3's video diffusion model on a compatible combined RGB/alpha latent distribution, **the resulting VAE does not give text-to-transparent-video generation**. Also, 128x128 yields only an 8x8 spatial latent grid; evaluate detail loss before raising resolution.
+
+### Full 22 GiB Colab command (existing dataset + pretrained VAE cache)
+
+```bash
+git pull --ff-only
+python tools/colab_compat.py --repair
+python train_wan_dual_lora.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/wan_dual_h3 \
+  --skip-download --resolution 128 --rank 4 \
+  --steps 2 --val-every 1 --save-every 1
+# Examine step-zero original alpha encoding baseline, step 1, step 2,
+# alpha_iou, alpha_mae, rgb_visible_mae_original_h3 and peak GPU VRAM.
+
+python train_wan_dual_lora.py --workdir /content/h3rgba_data \
+  --output-dir /content/h3rgba_runs/wan_dual_h3 \
+  --skip-download --resolution 128 --rank 4 \
+  --resume --steps 500 --val-every 25 --save-every 50
+```
+
+`--steps` is the **total** step count, including resumed steps; keep other loss/hyperparameter flags unchanged. Output:
+`checkpoints/dual_lora_last.safetensors`, `checkpoints/optimizer_last.pt`,
+`metrics.jsonl`, `validation.jsonl`, `previews/step_000000/contact_sheet.png`,
+`previews/step_000002/contact_sheet.png`, etc.
+Check saved checkpoint against multiple held-out examples and soft-alpha edges, not just train loss. Stage W has been CPU-tested using small instantiated H3 models; real H3 on 22 GiB must be validated using 2 steps first.
+
+
 ## Stage 3: preserve the pretrained RGB path while learning alpha
 
 Observed ablation on a held-out planet clip:
