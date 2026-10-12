@@ -9,6 +9,77 @@ unused-heldout video clips. Those experiments fed the ground-truth alpha
 video into the VAE encoder. That is a genuine and valuable VAE experiment
 but is not diffusion video generation.
 
+## Dedicated single-A100-80GB T2VA mode (53GB host RAM)
+
+The standard official BF16 `ComponentsManager.enable_auto_cpu_offload`
+recipe is **NOT** appropriate for a 53GB-host-RAM runtime because the
+weights exceed available host RAM. The previous `h3_full_diffusion_probe.py`
+resource guard was correct **for that BF16/CPU-streaming recipe**, but
+incorrect to apply as a universal ban on A100 80GB H3 execution.
+
+For this hardware, a credible alternate execution mode uses:
+
+- A single **A100 80GB (Ampere, sm_80)** with standard PyTorch SDPA
+  (do **NOT** enable Hopper FlashAttention3/Sage sm_120 backends).
+- **NF4 4-bit Qwen3-VL text conditioner** (about 21GB GPU-resident).
+- **TorchAO INT8 H3 video/audio diffusion transformer** (about 34GB).
+- Original video/audio VAEs, phase-managed (parked when not needed).
+- Phase-specific GPU loading, so host RAM does NOT need to hold 62GB+62GB
+  BF16 models simultaneously.
+- The independent `animede/Diffusers_minimax-h3` implementation documents
+  ~59.7GB peak GPU use in the **80GB-tier** (not independently measured
+  by this project on an A100/53GB Colab yet).
+
+Repository references:
+https://github.com/animede/Diffusers_minimax-h3/blob/main/README.en.md
+https://github.com/animede/Diffusers_minimax-h3/blob/main/core/runner.py
+
+### Reproducible A100 Colab commands
+
+Use a fresh Colab with **A100 80GB**. The external runner has been tested
+with **Python 3.12, torch 2.9.0 cu128, diffusers f37ab93, transformers
+5.14.1, torchao 0.17.0**. Installing these in a fresh virtualenv
+avoids breaking the pinned VAE-only Diffusers environment.
+
+```bash
+pip install uv
+uv python install 3.12
+uv venv --python 3.12 /content/h3_a100_venv
+uv pip install --python /content/h3_a100_venv/bin/python \
+  'torch==2.9.0' --index-url https://download.pytorch.org/whl/cu128
+
+uv pip install --python /content/h3_a100_venv/bin/python \
+  -r requirements-a100-h3.txt
+
+git clone https://github.com/animede/Diffusers_minimax-h3.git \
+  /content/Diffusers_minimax-h3
+
+/content/h3_a100_venv/bin/python tools/h3_a100_full_t2va.py \
+  --preflight-only
+
+# Only download T2VA's required ~144GB, NEVER the full ~499GB H3 repo.
+/content/h3_a100_venv/bin/python tools/h3_a100_full_t2va.py \
+  --download-only
+
+# Actually generate real 5-second H3 video + audio via the pretrained 33B
+# denoising transformer (not just VAE reconstruction).
+/content/h3_a100_venv/bin/python tools/h3_a100_full_t2va.py \
+  --generate --height 544 --width 960 --seconds 5 --steps 30
+```
+
+This wrapper executes the external runner's `MiniMaxH3Runner.generate()`,
+checks that the resulting MP4 decodes at least 124 frames and contains
+both video and audio streams, records actual peak GPU VRAM, and **marks
+alpha generation as false**. A real generated RGB video is not the
+missing separately generated alpha latents. No 500-step decoder-LoRA
+training weights are loaded in this first end-to-end baseline.
+
+The upstream 80GB-tier result was not verified on an A100 with ~53GB
+CPU RAM in this project; if the actual load runs out of memory,
+capture the error and resource stats before modifying placement. Do not
+mislabel a synthetic model or a VAE reconstruction as full-H3 success.
+
+
 ## Official full H3 diffusion architecture and resource budget
 
 Official Hugging Face docs:
