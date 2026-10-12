@@ -115,3 +115,43 @@ The full user-facing milestone is a generated MOV that retains alpha,
 whose masks also score well against truly unseen paired video mattes.
 Until the latter condition is established, classify this as an
 **experimental end-to-end integration**.
+
+
+## A100 Qwen3-VL processor crash (fixed October 12, 2026)
+
+If full H3 weights finish loading but inference stops with:
+
+```text
+Qwen3VLVideoProcessor requires the Torchvision library
+AttributeError: 'NoneType' object has no attribute 'create_mm_token_type_ids'
+```
+
+the issue is a **missing `torchvision` wheel inside the isolated Python 3.12
+A100 environment**, not bad H3 shards or insufficient A100 VRAM.
+
+Repair IN PLACE, preserving the completed 140+GB Hugging Face download:
+
+```bash
+uv pip install --python /content/h3_a100_venv/bin/python \\
+  torchvision==0.24.0 \\
+  --index-url https://download.pytorch.org/whl/cu128
+
+/content/h3_a100_venv/bin/python -c \
+  'import torch, torchvision; from transformers import Qwen3VLProcessor; print(torch.__version__, torchvision.__version__)'
+```
+
+Correct CUDA-wheel pair: `torch==2.9.0+cu128` and
+`torchvision==0.24.0+cu128`. The top-level Colab `/usr/bin/python3`
+is a different environment and installing torchvision there does NOT repair
+the isolated H3 generator.
+
+The A100 launcher now installs both matched packages, and the generator
+preflights the actual cached `Qwen3VLProcessor.from_pretrained()`
+**before** loading expensive 33B weights. Other processor dependencies
+fail early with a diagnostic error rather than later `NoneType` exceptions.
+
+If logs say a prequantized text-encoder CACHE save was skipped because
+disk had 21.5GB free versus a 25GB threshold, that is an optional cache
+optimization warning, **not** this processor failure. Be mindful that
+further paired-video dataset extraction may consume additional local disk.
+
